@@ -1,4 +1,4 @@
-tasks:
+tasks: 
   build:
     command: tsup
     platform: node

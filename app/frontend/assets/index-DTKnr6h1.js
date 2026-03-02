@@ -21094,7 +21094,7 @@ const Ise = Tu({ price: vc(), quantity: vc() });
 Tu({ gridLines: rB(Ise) });
 const Cse = 10,
   _se = 1,
-  UVe = ["1d", "4h", "1h", "5m"],
+  UVe = ["1d", "4h", "1h", "15m", "5m"],
   Mse = {
     type: "simple",
     botId: NaN,
@@ -21649,7 +21649,7 @@ const Use = 0,
   $se = { indicatorValue: "50", timeframe: B0.ONE_MINUTE, periods: "7" },
   Kse = { indicatorValue: "50", timeframe: B0.ONE_MINUTE, periods: "7" },
   BH = { combinator: "and", rules: [{ field: "RSI", operator: ">", value: LH }] },
-  Xse = ["1d", "4h", "1h", "5m"],
+  Xse = ["1d", "4h", "1h", "15m", "5m"],
   Qse = {
     botId: NaN,
     botName: "",
@@ -236564,7 +236564,7 @@ function y3(c, e) {
   }, {});
   return Object.values(t);
 }
-const eEe = ["1d", "4h", "1h", "5m", "1m"],
+const eEe = ["1d", "4h", "1h", "15m", "5m", "1m"],
   w3 = () => {},
   tEe = ({ botId: c }) => {
     const e = Ys(),
@@ -237697,7 +237697,7 @@ function qEe(c) {
     return [u, o, l, ...d].filter((h) => !!h);
   }, [a, i, n, r]);
 }
-const VEe = ["1d", "4h", "1h", "5m", "1m"],
+const VEe = ["1d", "4h", "1h", "15m", "5m", "1m"],
   C3 = () => {},
   FEe = ({ botId: c }) => {
     const e = Ys(),
@@ -249415,7 +249415,7 @@ function aVe(c) {
       return Zk(t.price, s, "");
     });
 }
-const oVe = ["1d", "4h", "1h", "5m", "1m"],
+const oVe = ["1d", "4h", "1h", "15m", "5m", "1m"],
   U3 = () => {},
   dVe = ({ botId: c }) => {
     const e = Ys(),
