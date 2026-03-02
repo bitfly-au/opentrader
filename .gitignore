@@ -31,3 +31,4 @@ tsconfig.tsbuildinfo
 # moon
 .moon/cache
 .moon/docker
+memory-bank
