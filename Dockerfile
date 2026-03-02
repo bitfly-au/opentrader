@@ -16,7 +16,7 @@ FROM base AS skeleton
 COPY . .
 
 # Copy the minimum of files necessary for installing dependencies
-RUN moon docker scaffold cli
+RUN moon docker scaffold app
 
 #### BUILD
 FROM base AS build
@@ -36,7 +36,7 @@ RUN moon docker setup
 COPY --from=skeleton /app/.moon/docker/sources .
 
 # Build something (optional)
-RUN moon run cli:build
+RUN moon run app:build
 
 # Remove unneeded files and folders
 RUN moon docker prune
