@@ -13,6 +13,18 @@ import {
 } from "@opentrader/bot-processor";
 import { logger } from "@opentrader/logger";
 
+/** Derive linear perpetual symbol: ETH/USDT → ETH/USDT:USDT */
+function toPerpSymbol(symbol: string): string {
+  if (symbol.includes(":")) return symbol;
+  const quote = (symbol.split("/")[1] || "").split(":")[0];
+  return `${symbol}:${quote}`;
+}
+
+/** Extract quote currency: ETH/USDT → USDT, ETH/USDT:USDT → USDT */
+function getQuoteCurrency(symbol: string): string {
+  return (symbol.split("/")[1] || "").split(":")[0];
+}
+
 /**
  * Volume Spike Cross-Margin Strategy
  *
@@ -33,12 +45,9 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
   } = ctx;
 
   // ── Derive perpetual symbol ────────────────────────────────────────────
-  // Convert spot symbol (ETH/USDT) to linear perpetual format (ETH/USDT:USDT)
   const spotSymbol = ctx.config.symbol;
-  const symbolParts = spotSymbol.split("/");
-  const quotePart = symbolParts[1] || "";
-  const quoteCurrency = quotePart.split(":")[0]; // handle both ETH/USDT and ETH/USDT:USDT
-  const perpSymbol = spotSymbol.includes(":") ? spotSymbol : `${spotSymbol}:${quoteCurrency}`;
+  const perpSymbol = toPerpSymbol(spotSymbol);
+  const quoteCurrency = getQuoteCurrency(spotSymbol);
 
   // ── Bot lifecycle ──────────────────────────────────────────────────────
 
@@ -106,73 +115,47 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
     return;
   }
 
-  // ── Volume spike detection ─────────────────────────────────────────────
+  // ── Condition checks ───────────────────────────────────────────────────
 
   const volumeRatio = currentCandle.volume / previousCandle.volume;
-
-  if (volumeRatio < params.volumeMultiplier) {
-    logger.info(
-      `[VolumeSpike] Volume ratio ${volumeRatio.toFixed(2)}x — below ${params.volumeMultiplier}x threshold, skipping`,
-    );
-    return;
-  }
-
-  logger.info(
-    `[VolumeSpike] 🚨 Volume spike detected! Ratio: ${volumeRatio.toFixed(2)}x (threshold: ${params.volumeMultiplier}x)`,
-  );
-
-  // ── Determine direction ────────────────────────────────────────────────
-  // Green candle (close > open) = price raised → Short
-  // Red candle (close < open) = price dropped → Long
-
   const isGreenCandle = currentCandle.close > currentCandle.open;
   const candleMove = Math.abs(currentCandle.close - currentCandle.open);
-
-  if (candleMove === 0) {
-    logger.warn("[VolumeSpike] Doji candle (no price movement) — skipping");
-    return;
-  }
-
-  // ── Minimum price move filter ──────────────────────────────────────────
-
   const priceMovePercent = candleMove / currentCandle.open;
 
-  if (priceMovePercent < params.minPriceMove) {
+  // Skip: volume below threshold
+  if (volumeRatio < params.volumeMultiplier) {
     logger.info(
-      `[VolumeSpike] Price move ${(priceMovePercent * 100).toFixed(2)}% — below ${(params.minPriceMove * 100).toFixed(2)}% threshold, skipping`,
+      `[VolumeSpike] Skip | Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x | Move: ${(priceMovePercent * 100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}%`,
     );
     return;
   }
 
-  logger.info(`[VolumeSpike] Price move: ${(priceMovePercent * 100).toFixed(2)}% (threshold: ${(params.minPriceMove * 100).toFixed(2)}%)`);
+  // Skip: doji candle
+  if (candleMove === 0) {
+    logger.warn("[VolumeSpike] Skip | Doji candle (no price movement)");
+    return;
+  }
+
+  // Skip: price move below threshold
+  if (priceMovePercent < params.minPriceMove) {
+    logger.info(
+      `[VolumeSpike] Skip | Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x ✓ | Move: ${(priceMovePercent * 100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}% ✗`,
+    );
+    return;
+  }
+
+  // ── All conditions met — calculate trade parameters ────────────────────
 
   const direction: "long" | "short" = isGreenCandle ? "short" : "long";
   const entryPrice = currentCandle.close;
 
-  logger.info(
-    `[VolumeSpike] Direction: ${direction.toUpperCase()} | Entry: ${entryPrice} | Candle move: ${candleMove.toFixed(4)}`,
-  );
+  // Calculate take profit
+  const tpPrice = direction === "short"
+    ? entryPrice - candleMove * params.shortTpRetreat
+    : entryPrice + candleMove * params.longTpBounce;
 
-  // ── Calculate take profit ──────────────────────────────────────────────
-
-  let tpPrice: number;
-
-  if (direction === "short") {
-    // Short: TP when price retreats by configured % of the candle's upward move
-    tpPrice = entryPrice - candleMove * params.shortTpRetreat;
-  } else {
-    // Long: TP when price bounces by configured % of the candle's downward move
-    tpPrice = entryPrice + candleMove * params.longTpBounce;
-  }
-
-  logger.info(`[VolumeSpike] Take profit target: ${tpPrice.toFixed(4)}`);
-
-  // ── Fetch balance & calculate position size ────────────────────────────
-
+  // Fetch balance
   const exchange: IExchange = yield useExchange();
-
-  // Fetch futures/swap wallet balance via CCXT directly
-  // Using .catch() because try-catch around yield doesn't work in generators
   const rawBalance: Record<string, any> | null = yield exchange.ccxt
     .fetchBalance({ type: "swap" })
     .catch((err: Error) => {
@@ -183,73 +166,51 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
   const walletBalance = rawBalance ? Number(rawBalance[quoteCurrency]?.free ?? 0) : 0;
 
   if (walletBalance <= 0) {
-    logger.warn(`[VolumeSpike] No available ${quoteCurrency} balance (${walletBalance}) — skipping`);
+    logger.warn(`[VolumeSpike] Skip | No ${quoteCurrency} balance (${walletBalance})`);
     return;
   }
 
-  logger.info(`[VolumeSpike] Wallet balance: ${walletBalance} ${quoteCurrency}`);
-
-  // ── Calculate position quantity from liquidation target ─────────────────
-  //
-  // Cross-margin liquidation formulas:
-  //   Long:  Qty = Balance / (Entry - LiqPrice × (1 - MMR))
-  //   Short: Qty = Balance / (LiqPrice × (1 + MMR) - Entry)
-  //
-  // Also cap at max leverage allows: Qty ≤ (Balance × Leverage) / Entry
-
+  // Calculate position quantity from liquidation target
+  // Cross-margin: Long Qty = Bal / (Entry - Liq×(1-MMR)), Short Qty = Bal / (Liq×(1+MMR) - Entry)
   const mmr = params.maintenanceMarginRate;
+  const liqTarget = direction === "long" ? params.longLiquidationTarget : params.shortLiquidationTarget;
   let quantity: number;
 
   if (direction === "long") {
-    const liqTarget = params.longLiquidationTarget;
     const denominator = entryPrice - liqTarget * (1 - mmr);
-
     if (denominator <= 0) {
-      logger.warn(
-        `[VolumeSpike] Long liquidation target ${liqTarget} is too close to or above entry ${entryPrice} — skipping`,
-      );
+      logger.warn(`[VolumeSpike] Skip | Liq target ${liqTarget} too close to entry ${entryPrice}`);
       return;
     }
-
     quantity = walletBalance / denominator;
   } else {
-    const liqTarget = params.shortLiquidationTarget;
     const denominator = liqTarget * (1 + mmr) - entryPrice;
-
     if (denominator <= 0) {
-      logger.warn(
-        `[VolumeSpike] Short liquidation target ${liqTarget} is too close to or below entry ${entryPrice} — skipping`,
-      );
+      logger.warn(`[VolumeSpike] Skip | Liq target ${liqTarget} too close to entry ${entryPrice}`);
       return;
     }
-
     quantity = walletBalance / denominator;
   }
 
-  // Cap quantity at what leverage allows
+  // Cap at leverage limit
   const maxQty = (walletBalance * params.leverage) / entryPrice;
-  if (quantity > maxQty) {
-    logger.warn(
-      `[VolumeSpike] Calculated qty ${quantity.toFixed(6)} exceeds leverage cap ${maxQty.toFixed(6)} — capping`,
-    );
-    quantity = maxQty;
-  }
+  if (quantity > maxQty) quantity = maxQty;
 
   if (quantity <= 0) {
-    logger.warn(`[VolumeSpike] Calculated quantity is ${quantity} — skipping`);
+    logger.warn(`[VolumeSpike] Skip | Calculated quantity is ${quantity}`);
     return;
   }
 
-  logger.info(`[VolumeSpike] Position quantity: ${quantity.toFixed(6)} (max from leverage: ${maxQty.toFixed(6)})`);
+  // ── Single consolidated signal log ─────────────────────────────────────
+
+  logger.info(
+    `[VolumeSpike] 🚨 ${direction.toUpperCase()} | Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x ✓ | Move: ${(priceMovePercent * 100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}% ✓ | Entry: ${entryPrice} | TP: ${tpPrice.toFixed(2)} | Liq: ${liqTarget} | Qty: ${quantity.toFixed(6)} | Bal: ${walletBalance.toFixed(2)} ${quoteCurrency}`,
+  );
 
   // ── Place the trade ────────────────────────────────────────────────────
 
   const entrySide = direction === "long" ? "Buy" : "Sell";
   const tpSide = direction === "long" ? "Sell" : "Buy";
-
-  logger.info(
-    `[VolumeSpike] 📈 Placing ${direction.toUpperCase()} | Entry: Market @ ~${entryPrice} | TP: ${tpPrice.toFixed(4)} | Qty: ${quantity.toFixed(6)}`,
-  );
 
   const trade: SmartTradeService = yield useSmartTrade({
     entry: {
@@ -339,7 +300,7 @@ volumeSpike.runPolicy = {
   onOrderFilled: true,
 };
 volumeSpike.watchers = {
-  watchCandles: ({ symbol }: IBotConfiguration) => symbol,
+  watchCandles: ({ symbol }: IBotConfiguration) => toPerpSymbol(symbol),
 };
 
 // ── Types ──────────────────────────────────────────────────────────────────
