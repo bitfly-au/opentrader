@@ -13,4 +13,12 @@ describe("isValidSymbol", () => {
   it("test existing exchange with a symbol starting with a number", () => {
     expect(isValidSymbol("1INCH/USDT")).toBe(true);
   });
+
+  it("test perpetual/futures symbol format", () => {
+    expect(isValidSymbol("ETH/USDT:USDT")).toBe(true);
+  });
+
+  it("test perpetual/futures symbol with different settle currency", () => {
+    expect(isValidSymbol("BTC/USD:BTC")).toBe(true);
+  });
 });
