@@ -16,18 +16,21 @@ export type UseSmartTradePayload = {
   entry: {
     type: XOrderType;
     side: XOrderSide;
+    symbol?: string; // if undefined, the bot's default symbol is used
     price?: number; // if undefined, then it's a market order
     status?: XOrderStatus; // default to Idle
   };
   tp?: {
     type: XOrderType;
     side: XOrderSide;
+    symbol?: string; // if undefined, the bot's default symbol is used
     price?: number; // if undefined, then it's a market order
     status?: XOrderStatus; // default to Idle
   };
   sl?: {
     type: XOrderType;
     side: XOrderSide;
+    symbol?: string; // if undefined, the bot's default symbol is used
     price?: number; // if undefined, then it's a market order
     stopPrice: number;
   };
