@@ -99,5 +99,44 @@ describe("CandlesChannel", () => {
     expect(result.high).toBe(120);
     expect(result.low).toBe(95);
     expect(result.close).toBe(110);
+    expect(result.volume).toBe(100);
+  });
+
+  it("updates volume on duplicate timestamp candles with cumulative value", () => {
+    const alignedTimestamp = getBaseAlignedTimestamp();
+    const firstUpdate: ICandlestick = {
+      timestamp: alignedTimestamp,
+      open: 100,
+      high: 102,
+      low: 99,
+      close: 101,
+      volume: 5,
+    };
+    const secondUpdate: ICandlestick = {
+      timestamp: alignedTimestamp,
+      open: 100,
+      high: 105,
+      low: 98,
+      close: 103,
+      volume: 50,
+    };
+    const finalUpdate: ICandlestick = {
+      timestamp: alignedTimestamp,
+      open: 100,
+      high: 105,
+      low: 97,
+      close: 104,
+      volume: 500,
+    };
+
+    channel["handleCandle"](firstUpdate);
+    channel["handleCandle"](secondUpdate);
+    channel["handleCandle"](finalUpdate);
+
+    const result = channel["bucket"][0];
+    expect(result.volume).toBe(500);
+    expect(result.high).toBe(105);
+    expect(result.low).toBe(97);
+    expect(result.close).toBe(104);
   });
 });

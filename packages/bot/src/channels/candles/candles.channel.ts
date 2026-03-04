@@ -102,6 +102,7 @@ export class CandlesChannel extends EventEmitter {
       lastCandle.high = Math.max(candle.high, lastCandle.high);
       lastCandle.low = Math.min(candle.low, lastCandle.low);
       lastCandle.close = candle.close;
+      lastCandle.volume = candle.volume;
       return;
     }
 
