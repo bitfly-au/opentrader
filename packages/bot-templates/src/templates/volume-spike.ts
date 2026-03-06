@@ -8,11 +8,17 @@ import {
   useSmartTrade,
   getSmartTrade,
   cancelSmartTrade,
+  cancelAllTrades,
   IBotConfiguration,
   TBotContext,
   type SmartTradeService,
+  type CancelAllTradesResult,
 } from "@opentrader/bot-processor";
 import { logger } from "@opentrader/logger";
+
+// ════════════════════════════════════════════════════════════════════════════
+// Helper utilities
+// ════════════════════════════════════════════════════════════════════════════
 
 /** Derive linear perpetual symbol: ETH/USDT → ETH/USDT:USDT */
 function toPerpSymbol(symbol: string): string {
@@ -26,6 +32,74 @@ function getQuoteCurrency(symbol: string): string {
   return (symbol.split("/")[1] || "").split(":")[0];
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Helper: Market-close all open positions
+// ════════════════════════════════════════════════════════════════════════════
+
+function* marketCloseAllPositions(
+  state: VolumeSpikeState,
+  perpSymbol: string,
+) {
+  const openTrades = state.openTrades ?? [];
+
+  if (openTrades.length === 0) {
+    logger.info("[VolumeSpike] No open positions to close");
+    return;
+  }
+
+  // Separate longs and shorts, sum quantities
+  let totalLongQty = new Big(0);
+  let totalShortQty = new Big(0);
+
+  for (const trade of openTrades) {
+    if (trade.direction === "long") {
+      totalLongQty = totalLongQty.plus(trade.quantity);
+    } else {
+      totalShortQty = totalShortQty.plus(trade.quantity);
+    }
+  }
+
+  const exchange: IExchange = yield useExchange();
+
+  // Close longs with a market sell
+  if (totalLongQty.gt(0)) {
+    logger.info(
+      `[VolumeSpike] Market-closing ${totalLongQty.toFixed(6)} long position on ${perpSymbol}`,
+    );
+    yield exchange.ccxt
+      .createOrder(perpSymbol, "market", "sell", totalLongQty.toNumber(), undefined, { reduceOnly: true })
+      .then((order: any) => {
+        logger.info(
+          `[VolumeSpike] ✅ Market close (long) — Sell ${totalLongQty.toFixed(6)} @ market | orderId: ${order?.id ?? "unknown"}`,
+        );
+      })
+      .catch((err: Error) => {
+        logger.error(`[VolumeSpike] ❌ Failed to market-close longs: ${err.message}`);
+      });
+  }
+
+  // Close shorts with a market buy
+  if (totalShortQty.gt(0)) {
+    logger.info(
+      `[VolumeSpike] Market-closing ${totalShortQty.toFixed(6)} short position on ${perpSymbol}`,
+    );
+    yield exchange.ccxt
+      .createOrder(perpSymbol, "market", "buy", totalShortQty.toNumber(), undefined, { reduceOnly: true })
+      .then((order: any) => {
+        logger.info(
+          `[VolumeSpike] ✅ Market close (short) — Buy ${totalShortQty.toFixed(6)} @ market | orderId: ${order?.id ?? "unknown"}`,
+        );
+      })
+      .catch((err: Error) => {
+        logger.error(`[VolumeSpike] ❌ Failed to market-close shorts: ${err.message}`);
+      });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Main Strategy
+// ════════════════════════════════════════════════════════════════════════════
+
 /**
  * Volume Spike Cross-Margin Strategy
  *
@@ -36,6 +110,11 @@ function getQuoteCurrency(symbol: string): string {
  *
  * Position size is calculated to target a specific cross-margin liquidation price.
  * Take profit is based on a percentage retreat/bounce of the spike candle's move.
+ *
+ * Features:
+ *   - Volume requirement can be disabled (trades on price movement alone)
+ *   - Trading range to restrict entries to a price window
+ *   - Concurrent trading with configurable max simultaneous positions
  */
 export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeState>) {
   const {
@@ -56,6 +135,10 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
     logger.info(`[VolumeSpike] Bot started on ${spotSymbol} (perp: ${perpSymbol})`);
     logger.info(ctx.config, "[VolumeSpike] Bot config");
 
+    // Initialize state (preserve counter & trades across restarts)
+    state.openTrades = state.openTrades ?? [];
+    state.tradeCounter = state.tradeCounter ?? 0;
+
     // Set cross margin mode & leverage once on bot start
     const startExchange: IExchange = yield useExchange();
 
@@ -73,37 +156,56 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
   }
 
   if (onStop) {
-    logger.info("[VolumeSpike] Bot stopped — cancelling open trades");
-    yield cancelSmartTrade();
-    state.inPosition = false;
+    logger.info("[VolumeSpike] Bot stopped — cancelling all trades");
+    const result: CancelAllTradesResult = yield cancelAllTrades();
+    logger.info(`[VolumeSpike] Cancelled ${result.cancelled}/${result.total} trades`);
+
+    // Market-close any remaining positions
+    yield* marketCloseAllPositions(state, perpSymbol);
+
+    state.openTrades = [];
     return;
   }
 
-  // ── Handle order fill — reset state only, no trading logic ─────────────
+  // ── Handle order fill — clean up completed trades ──────────────────────
 
   if (ctx.event === "onOrderFilled") {
-    if (state.inPosition) {
-      const existingTrade: SmartTradeService | null = yield getSmartTrade();
+    const stillOpen: TradeRecord[] = [];
+
+    for (const trade of state.openTrades ?? []) {
+      const existingTrade: SmartTradeService | null = yield getSmartTrade(trade.ref);
       if (existingTrade && existingTrade.isCompleted()) {
-        logger.info("[VolumeSpike] Trade completed (order filled) — resetting state");
-        state.inPosition = false;
+        logger.info(`[VolumeSpike] ✅ Trade ${trade.ref} completed (TP filled) — ${trade.direction.toUpperCase()}`);
+      } else {
+        stillOpen.push(trade);
       }
     }
+
+    state.openTrades = stillOpen;
     return;
   }
 
-  // ── Skip if already in a position ──────────────────────────────────────
+  // ── Clean up completed trades on each candle tick ──────────────────────
 
-  if (state.inPosition) {
-    const existingTrade: SmartTradeService | null = yield getSmartTrade();
+  const activeOpenTrades: TradeRecord[] = [];
+  for (const trade of state.openTrades ?? []) {
+    const existingTrade: SmartTradeService | null = yield getSmartTrade(trade.ref);
     if (existingTrade && !existingTrade.isCompleted()) {
-      logger.info("[VolumeSpike] Already in a position — skipping");
-      return;
+      activeOpenTrades.push(trade);
+    } else if (existingTrade && existingTrade.isCompleted()) {
+      logger.info(`[VolumeSpike] ✅ Trade ${trade.ref} completed — removing from tracker`);
     }
+  }
+  state.openTrades = activeOpenTrades;
 
-    // Trade completed — reset state
-    logger.info("[VolumeSpike] Previous trade completed — ready for new signals");
-    state.inPosition = false;
+  // ── Max concurrent trades check ────────────────────────────────────────
+
+  const openCount = (state.openTrades ?? []).length;
+  if (openCount >= params.maxConcurrentTrades) {
+    logger.info(
+      `[VolumeSpike] Skip | At max concurrent trades (${openCount}/${params.maxConcurrentTrades})`,
+    );
+    return;
   }
 
   // ── Get last two closed candles ────────────────────────────────────────
@@ -116,19 +218,39 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
     return;
   }
 
+  // ── Trading range check ────────────────────────────────────────────────
+
+  const currentPrice = currentCandle.close;
+
+  if (params.tradingRangeTop > 0 && currentPrice > params.tradingRangeTop) {
+    logger.info(
+      `[VolumeSpike] Skip | Price ${currentPrice.toFixed(2)} > tradingRangeTop ${params.tradingRangeTop}`,
+    );
+    return;
+  }
+
+  if (params.tradingRangeBottom > 0 && currentPrice < params.tradingRangeBottom) {
+    logger.info(
+      `[VolumeSpike] Skip | Price ${currentPrice.toFixed(2)} < tradingRangeBottom ${params.tradingRangeBottom}`,
+    );
+    return;
+  }
+
   // ── Condition checks ───────────────────────────────────────────────────
 
-  const volumeRatio = new Big(currentCandle.volume).div(previousCandle.volume);
+  const volumeRatio = new Big(currentCandle.volume).div(previousCandle.volume || 1);
   const isGreenCandle = new Big(currentCandle.close).gt(currentCandle.open);
   const candleMove = new Big(currentCandle.close).minus(currentCandle.open).abs();
   const priceMovePercent = candleMove.div(currentCandle.open);
 
-  // Skip: volume below threshold
-  if (volumeRatio.lt(params.volumeMultiplier)) {
-    logger.info(
-      `[VolumeSpike] Skip | Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x | Move: ${priceMovePercent.times(100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}%`,
-    );
-    return;
+  // Volume check (can be disabled via config)
+  if (params.volumeFilterEnabled) {
+    if (volumeRatio.lt(params.volumeMultiplier)) {
+      logger.info(
+        `[VolumeSpike] Skip | Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x | Move: ${priceMovePercent.times(100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}%`,
+      );
+      return;
+    }
   }
 
   // Skip: doji candle
@@ -139,8 +261,11 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
 
   // Skip: price move below threshold
   if (priceMovePercent.lt(params.minPriceMove)) {
+    const volStatus = params.volumeFilterEnabled
+      ? `Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x ✓ | `
+      : `Vol: disabled | `;
     logger.info(
-      `[VolumeSpike] Skip | Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x ✓ | Move: ${priceMovePercent.times(100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}% ✗`,
+      `[VolumeSpike] Skip | ${volStatus}Move: ${priceMovePercent.times(100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}% ✗`,
     );
     return;
   }
@@ -171,6 +296,10 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
     return;
   }
 
+  // Each trade gets an equal share of the balance so that if all slots fill,
+  // the aggregate position equals what a single-trade strategy would open.
+  const effectiveBalance = walletBalance.div(params.maxConcurrentTrades);
+
   // Calculate position quantity from liquidation target
   // Cross-margin: Long Qty = Bal / (Entry - Liq×(1-MMR)), Short Qty = Bal / (Liq×(1+MMR) - Entry)
   const mmr = new Big(params.maintenanceMarginRate);
@@ -183,18 +312,18 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
       logger.warn(`[VolumeSpike] Skip | Liq target ${liqTarget.toFixed(2)} too close to entry ${entryPrice.toFixed(2)}`);
       return;
     }
-    quantityBig = walletBalance.div(denominator);
+    quantityBig = effectiveBalance.div(denominator);
   } else {
     const denominator = liqTarget.times(new Big(1).plus(mmr)).minus(entryPrice);
     if (denominator.lte(0)) {
       logger.warn(`[VolumeSpike] Skip | Liq target ${liqTarget.toFixed(2)} too close to entry ${entryPrice.toFixed(2)}`);
       return;
     }
-    quantityBig = walletBalance.div(denominator);
+    quantityBig = effectiveBalance.div(denominator);
   }
 
-  // Cap at leverage limit
-  const maxQty = walletBalance.times(params.leverage).div(entryPrice);
+  // Cap at leverage limit (per-trade share)
+  const maxQty = effectiveBalance.times(params.leverage).div(entryPrice);
   if (quantityBig.gt(maxQty)) quantityBig = maxQty;
 
   if (quantityBig.lte(0)) {
@@ -211,40 +340,56 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
     return;
   }
 
-  // ── Single consolidated signal log ─────────────────────────────────────
+  // ── Place the trade ────────────────────────────────────────────────────
+
+  const tradeRef = `t_${state.tradeCounter ?? 0}`;
+  state.tradeCounter = (state.tradeCounter ?? 0) + 1;
+
+  const volStatus = params.volumeFilterEnabled
+    ? `Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x ✓`
+    : `Vol: disabled`;
 
   logger.info(
-    `[VolumeSpike] 🚨 ${direction.toUpperCase()} | Vol: ${volumeRatio.toFixed(2)}x/${params.volumeMultiplier}x ✓ | Move: ${priceMovePercent.times(100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}% ✓ | Entry: ${entryPrice.toFixed(2)} | TP: ${tpPriceBig.toFixed(2)} | Liq: ${liqTarget.toFixed(2)} | Qty: ${quantityBig.toFixed(6)} | Bal: ${walletBalance.toFixed(2)} ${quoteCurrency}`,
+    `[VolumeSpike] 🚨 ${direction.toUpperCase()} ${tradeRef} | ${volStatus} | Move: ${priceMovePercent.times(100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}% ✓ | ` +
+    `Entry: ${entryPrice.toFixed(2)} | TP: ${tpPriceBig.toFixed(2)} | Liq: ${liqTarget.toFixed(2)} | ` +
+    `Qty: ${quantityBig.toFixed(6)} | Bal: ${walletBalance.toFixed(2)} (eff: ${effectiveBalance.toFixed(2)}) ${quoteCurrency} | ` +
+    `Slot: ${openCount + 1}/${params.maxConcurrentTrades}`,
   );
-
-  // ── Place the trade ────────────────────────────────────────────────────
 
   const entrySide = direction === "long" ? "Buy" : "Sell";
   const tpSide = direction === "long" ? "Sell" : "Buy";
 
-  const trade: SmartTradeService = yield useSmartTrade({
-    entry: {
-      type: "Market",
-      side: entrySide,
-      symbol: perpSymbol,
+  const trade: SmartTradeService = yield useSmartTrade(
+    {
+      entry: {
+        type: "Market",
+        side: entrySide,
+        symbol: perpSymbol,
+      },
+      tp: {
+        type: "Limit",
+        side: tpSide,
+        price: tpPrice,
+        symbol: perpSymbol,
+      },
+      quantity,
     },
-    tp: {
-      type: "Limit",
-      side: tpSide,
-      price: tpPrice,
-      symbol: perpSymbol,
-    },
+    tradeRef,
+  );
+
+  // Track the trade
+  if (!state.openTrades) state.openTrades = [];
+  state.openTrades.push({
+    ref: tradeRef,
+    direction,
     quantity,
+    entryPrice: entryPrice.toNumber(),
+    tpPrice,
   });
 
-  state.inPosition = true;
-  state.lastDirection = direction;
-  state.lastEntryPrice = entryPrice.toNumber();
-  state.lastTpPrice = tpPrice;
-  state.lastQuantity = quantity;
-
   logger.info(
-    `[VolumeSpike] ✅ Trade placed — ${direction.toUpperCase()} ${quantity.toFixed(6)} @ market, TP @ ${tpPriceBig.toFixed(4)}`,
+    `[VolumeSpike] ✅ Trade ${tradeRef} placed — ${direction.toUpperCase()} ${quantity.toFixed(6)} @ market, TP @ ${tpPrice.toFixed(4)} | ` +
+    `Total open trades: ${state.openTrades.length}`,
   );
 }
 
@@ -254,20 +399,72 @@ volumeSpike.displayName = "Volume Spike (Cross Margin)";
 volumeSpike.description =
   "Detects volume spikes on closed candles and enters mean-reversion trades with cross-margin position sizing. " +
   "Green candles (price raise) trigger shorts; red candles (price drop) trigger longs. " +
-  "Position size is calculated to target a specific liquidation price.";
+  "Position size is calculated to target a specific liquidation price. " +
+  "Supports disabling volume requirement, trading within a price range, and concurrent positions.";
 
 volumeSpike.schema = z.object({
+  // ── Volume Filter ────────────────────────────────────────────────────
+  volumeFilterEnabled: z
+    .boolean()
+    .default(true)
+    .describe(
+      "Enable or disable the volume spike requirement. When true (default), entries require the current candle's " +
+      "volume to be at least volumeMultiplier× the previous candle's volume. When false, the strategy trades " +
+      "based on price movement (minPriceMove) alone — useful in low-liquidity markets or when you want to " +
+      "capture all significant price moves regardless of volume.",
+    ),
   volumeMultiplier: z
     .number()
     .positive()
     .default(4)
-    .describe("Minimum volume ratio (current / previous) to trigger an entry"),
+    .describe(
+      "Minimum volume ratio (current / previous candle) to trigger an entry. Only used when volumeFilterEnabled is true. " +
+      "Example: 4 means the current candle must have 4× the volume of the previous candle.",
+    ),
   minPriceMove: z
     .number()
     .min(0)
     .max(1)
     .default(0.02)
-    .describe("Minimum candle price move as fraction (0.02 = 2%) to trigger an entry"),
+    .describe(
+      "Minimum candle price move as fraction (0.02 = 2%) to trigger an entry. " +
+      "Always active regardless of volumeFilterEnabled. Filters out small candles that aren't worth trading.",
+    ),
+
+  // ── Trading Range ────────────────────────────────────────────────────
+  tradingRangeTop: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Upper price boundary — skip entries when the candle close is above this price. " +
+      "Set to 0 (default) to disable the upper limit. " +
+      "Example: Set to 2500 to only trade when ETH is below $2,500.",
+    ),
+  tradingRangeBottom: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Lower price boundary — skip entries when the candle close is below this price. " +
+      "Set to 0 (default) to disable the lower limit. " +
+      "Example: Set to 2000 to only trade when ETH is above $2,000. " +
+      "Combined with tradingRangeTop, defines a price corridor for trading.",
+    ),
+
+  // ── Concurrency ──────────────────────────────────────────────────────
+  maxConcurrentTrades: z
+    .number()
+    .positive()
+    .default(1)
+    .describe(
+      "Maximum number of simultaneous open positions. Balance is divided equally across all slots. " +
+      "Set to 1 (default) for single-position behavior (original mode). " +
+      "Example: With 3 concurrent trades and $1,000 balance, each trade uses ~$333 for position sizing. " +
+      "Higher values allow capturing multiple signals but reduce per-trade size.",
+    ),
+
+  // ── Position Sizing ──────────────────────────────────────────────────
   leverage: z
     .number()
     .positive()
@@ -313,14 +510,21 @@ volumeSpike.watchers = {
   watchCandles: ({ symbol }: IBotConfiguration) => toPerpSymbol(symbol),
 };
 
-// ── Types ──────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// Types
+// ════════════════════════════════════════════════════════════════════════════
+
+type TradeRecord = {
+  ref: string;
+  direction: "long" | "short";
+  quantity: number;
+  entryPrice: number;
+  tpPrice: number;
+};
 
 type VolumeSpikeState = {
-  inPosition?: boolean;
-  lastDirection?: "long" | "short";
-  lastEntryPrice?: number;
-  lastTpPrice?: number;
-  lastQuantity?: number;
+  openTrades?: TradeRecord[];
+  tradeCounter?: number;
 };
 
 export type VolumeSpikeConfig = IBotConfiguration<z.infer<typeof volumeSpike.schema>>;
