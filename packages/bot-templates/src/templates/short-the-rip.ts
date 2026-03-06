@@ -1,4 +1,5 @@
 import { z } from "zod";
+import Big from "big.js";
 import type { IExchange } from "@opentrader/exchanges";
 import type { ICandlestick } from "@opentrader/types";
 import {
@@ -218,7 +219,7 @@ function computeVolumeTrendRatio(
   candles: ICandlestick[],
   shortPeriod: number,
   longPeriod: number,
-): number {
+): Big {
   const volumes = candles.map((c) => c.volume);
   const shortSma = computeSMA(volumes, shortPeriod);
   const longSma = computeSMA(volumes, longPeriod);
@@ -226,8 +227,39 @@ function computeVolumeTrendRatio(
   const lastShort = shortSma[shortSma.length - 1];
   const lastLong = longSma[longSma.length - 1];
 
-  if (isNaN(lastShort) || isNaN(lastLong) || lastLong === 0) return 0;
-  return lastShort / lastLong;
+  if (isNaN(lastShort) || isNaN(lastLong) || lastLong === 0) return new Big(0);
+  return new Big(lastShort).div(lastLong);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Helper: Market-close the open short position
+// ════════════════════════════════════════════════════════════════════════════
+
+function* marketCloseShort(
+  perpSymbol: string,
+  quantity: number,
+) {
+  if (quantity <= 0) {
+    logger.info("[ShortTheRip] No quantity to close");
+    return;
+  }
+
+  logger.info(
+    `[ShortTheRip] Market-closing short — qty: ${quantity} ${perpSymbol}`,
+  );
+
+  const exchange: IExchange = yield useExchange();
+
+  yield exchange.ccxt
+    .createOrder(perpSymbol, "market", "buy", quantity, undefined, { reduceOnly: true })
+    .then((order: any) => {
+      logger.info(
+        `[ShortTheRip] ✅ Market close order placed — Buy ${quantity} @ market | orderId: ${order?.id ?? "unknown"}`,
+      );
+    })
+    .catch((err: Error) => {
+      logger.error(`[ShortTheRip] ❌ Failed to market-close short: ${err.message}`);
+    });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -303,6 +335,12 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   if (onStop) {
     logger.info("[ShortTheRip] Bot stopped — cancelling open trades");
     yield cancelSmartTrade("main");
+
+    // Market-close the short position if we have one
+    if (state.inPosition && (state.positionQuantity ?? 0) > 0) {
+      yield* marketCloseShort(perpSymbol, state.positionQuantity!);
+    }
+
     state.phase = "SCANNING";
     state.inPosition = false;
     return;
@@ -318,6 +356,17 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
         // For a short: TP hit = profit, SL hit = loss
         const tpHit = existingTrade.tp?.status === "Filled";
         const wasProfit = tpHit;
+
+        // Calculate P&L and update daily tracker
+        const entryBig = new Big(state.entryPrice ?? 0);
+        if (entryBig.gt(0)) {
+          const exitPrice = tpHit
+            ? new Big(state.takeProfitPrice ?? 0)
+            : new Big(state.stopLossPrice ?? 0);
+          // Short P&L: (entry - exit) / entry × 100
+          const pnlPercent = entryBig.minus(exitPrice).div(entryBig).times(100).toNumber();
+          state.dailyPnl = (state.dailyPnl ?? 0) + pnlPercent;
+        }
 
         if (wasProfit) {
           state.consecutiveLosses = 0;
@@ -357,7 +406,7 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
 
   if ((state.dailyPnl ?? 0) <= -params.maxDailyLossPercent) {
     logger.warn(
-      `[ShortTheRip] 🛑 Circuit breaker: Daily loss ${state.dailyPnl?.toFixed(2)}% exceeds limit ${params.maxDailyLossPercent}%. Paused.`,
+      `[ShortTheRip] 🛑 Circuit breaker: Daily loss ${(state.dailyPnl ?? 0).toFixed(2)}% exceeds limit ${params.maxDailyLossPercent}%. Paused.`,
     );
     return;
   }
@@ -382,7 +431,17 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   if (state.inPosition) {
     const existingTrade: SmartTradeService | null = yield getSmartTrade("main");
     if (existingTrade && existingTrade.isCompleted()) {
-      // Trade completed between candle events
+      // Trade completed between candle events — calculate P&L
+      const entryBig = new Big(state.entryPrice ?? 0);
+      if (entryBig.gt(0)) {
+        const tpHit = existingTrade.tp?.status === "Filled";
+        const exitPrice = tpHit
+          ? new Big(state.takeProfitPrice ?? 0)
+          : new Big(state.stopLossPrice ?? 0);
+        const pnlPercent = entryBig.minus(exitPrice).div(entryBig).times(100).toNumber();
+        state.dailyPnl = (state.dailyPnl ?? 0) + pnlPercent;
+      }
+
       state.inPosition = false;
       state.phase = "SCANNING";
       state.lastTradeTimestamp = now;
@@ -419,7 +478,23 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
         logger.info(
           `[ShortTheRip] 📉 RSI oversold (${currentRSI.toFixed(1)}) — closing position early`,
         );
+
+        // Cancel TP/SL orders
         yield cancelSmartTrade("main");
+
+        // Market-close the short position
+        if ((state.positionQuantity ?? 0) > 0) {
+          yield* marketCloseShort(perpSymbol, state.positionQuantity!);
+        }
+
+        // Estimate P&L using current close as exit
+        const entryBig = new Big(state.entryPrice ?? 0);
+        const exitPrice = new Big(closes[closes.length - 1]);
+        if (entryBig.gt(0)) {
+          const pnlPercent = entryBig.minus(exitPrice).div(entryBig).times(100).toNumber();
+          state.dailyPnl = (state.dailyPnl ?? 0) + pnlPercent;
+        }
+
         state.inPosition = false;
         state.phase = "SCANNING";
         state.lastTradeTimestamp = now;
@@ -500,23 +575,23 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   // Latest values
   const lastIdx = execCandles.length - 1;
   const prevIdx = lastIdx - 1;
-  const currentPrice = execCloses[lastIdx];
-  const previousCandleLow = execCandles[prevIdx].low;
-  const currentClose = execCloses[lastIdx];
-  const previousClose = execCloses[prevIdx];
+  const currentPrice = new Big(execCloses[lastIdx]);
+  const previousCandleLow = new Big(execCandles[prevIdx].low);
+  const currentClose = new Big(execCloses[lastIdx]);
+  const previousClose = new Big(execCloses[prevIdx]);
 
-  const execEmaValue = execEMA[lastIdx];
-  const macroEmaValue = macroEMA[macroCandles.length - 1];
-  const macroPrice = macroCloses[macroCloses.length - 1];
+  const execEmaValue = new Big(execEMA[lastIdx]);
+  const macroEmaValue = new Big(macroEMA[macroCandles.length - 1]);
+  const macroPrice = new Big(macroCloses[macroCloses.length - 1]);
   const currentRSI = rsiArr[lastIdx];
-  const upperBB = bb.upper[lastIdx];
-  const lowerBB = bb.lower[lastIdx];
-  const currentATR = atrArr[lastIdx];
+  const upperBB = new Big(bb.upper[lastIdx]);
+  const lowerBB = new Big(bb.lower[lastIdx]);
+  const currentATR = new Big(atrArr[lastIdx]);
 
   // Validate all indicators are computed
   if (
-    isNaN(execEmaValue) || isNaN(macroEmaValue) || isNaN(currentRSI) ||
-    isNaN(upperBB) || isNaN(lowerBB) || isNaN(currentATR)
+    isNaN(execEMA[lastIdx]) || isNaN(macroEMA[macroCandles.length - 1]) || isNaN(currentRSI) ||
+    isNaN(bb.upper[lastIdx]) || isNaN(bb.lower[lastIdx]) || isNaN(atrArr[lastIdx])
   ) {
     logger.warn("[ShortTheRip] Indicators not ready (NaN values) — skipping");
     return;
@@ -528,8 +603,8 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   const scoreBreakdown: string[] = [];
 
   // 1. TREND FILTER: Price below EMA on both timeframes
-  const execBelowEma = currentPrice < execEmaValue;
-  const macroBelowEma = macroPrice < macroEmaValue;
+  const execBelowEma = currentPrice.lt(execEmaValue);
+  const macroBelowEma = macroPrice.lt(macroEmaValue);
   if (execBelowEma && macroBelowEma) {
     score += params.scoreTrendFilter;
     scoreBreakdown.push(`Trend(${params.scoreTrendFilter})`);
@@ -544,16 +619,16 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   }
 
   // 3. BB TOUCH: Price at or above Upper Bollinger Band
-  const touchingUpperBB = currentPrice >= upperBB;
+  const touchingUpperBB = currentPrice.gte(upperBB);
   if (touchingUpperBB) {
     score += params.scoreBBTouch;
     scoreBreakdown.push(`BB(${params.scoreBBTouch})`);
   }
 
   // 4. REJECTION CANDLE: Current close below previous candle's low
-  const isRejectionCandle = currentClose < previousCandleLow;
+  const isRejectionCandle = currentClose.lt(previousCandleLow);
   // Also accept a simple red candle (close < previous close) as a weaker signal
-  const isRedCandle = currentClose < previousClose;
+  const isRedCandle = currentClose.lt(previousClose);
   if (isRejectionCandle) {
     score += params.scoreRejectionCandle;
     scoreBreakdown.push(`Reject(${params.scoreRejectionCandle})`);
@@ -574,7 +649,7 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
       params.volumeLongPeriod,
     );
 
-    if (volRatio > params.volumeAbortRatio) {
+    if (volRatio.gt(params.volumeAbortRatio)) {
       volumeAborted = true;
       logger.info(
         `[ShortTheRip] Volume abort | Ratio: ${volRatio.toFixed(2)} > ${params.volumeAbortRatio} — bounce has too much momentum`,
@@ -619,17 +694,17 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   // ── Calculate position size & risk levels ──────────────────────────────
 
   const entryPrice = currentPrice;
-  const stopLoss = entryPrice + currentATR * params.atrStopMultiplier;
+  const stopLoss = entryPrice.plus(currentATR.times(params.atrStopMultiplier));
 
-  let takeProfit: number;
+  let takeProfit: Big;
   if (params.tp2Target === "lowerBB") {
     takeProfit = lowerBB;
   } else {
-    takeProfit = entryPrice - currentATR * params.tp2AtrMultiplier;
+    takeProfit = entryPrice.minus(currentATR.times(params.tp2AtrMultiplier));
   }
 
   // Sanity: TP must be below entry for a short
-  if (takeProfit >= entryPrice) {
+  if (takeProfit.gte(entryPrice)) {
     logger.warn(
       `[ShortTheRip] Skip | TP (${takeProfit.toFixed(2)}) >= Entry (${entryPrice.toFixed(2)}) — invalid`,
     );
@@ -637,7 +712,7 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   }
 
   // Sanity: SL must be above entry for a short
-  if (stopLoss <= entryPrice) {
+  if (stopLoss.lte(entryPrice)) {
     logger.warn(
       `[ShortTheRip] Skip | SL (${stopLoss.toFixed(2)}) <= Entry (${entryPrice.toFixed(2)}) — invalid`,
     );
@@ -652,10 +727,10 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
       return null;
     });
 
-  const walletBalance = rawBalance ? Number(rawBalance[quoteCurrency]?.free ?? 0) : 0;
+  const walletBalance = new Big(rawBalance ? Number(rawBalance[quoteCurrency]?.free ?? 0) : 0);
 
-  if (walletBalance <= 0) {
-    logger.warn(`[ShortTheRip] Skip | No ${quoteCurrency} balance (${walletBalance})`);
+  if (walletBalance.lte(0)) {
+    logger.warn(`[ShortTheRip] Skip | No ${quoteCurrency} balance (${walletBalance.toFixed(2)})`);
     return;
   }
 
@@ -663,16 +738,26 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   // Risk per trade = walletBalance × riskPercent / 100
   // Risk per unit = |stopLoss - entry|
   // Quantity = riskAmount / riskPerUnit
-  const riskAmount = (walletBalance * params.riskPercent) / 100;
-  const riskPerUnit = stopLoss - entryPrice; // positive for a short
-  let quantity = riskAmount / riskPerUnit;
+  const riskAmount = walletBalance.times(params.riskPercent).div(100);
+  const riskPerUnit = stopLoss.minus(entryPrice); // positive for a short
+  let quantityBig = riskAmount.div(riskPerUnit);
 
   // Cap at leverage limit
-  const maxQty = (walletBalance * params.leverage) / entryPrice;
-  if (quantity > maxQty) quantity = maxQty;
+  const maxQty = walletBalance.times(params.leverage).div(entryPrice);
+  if (quantityBig.gt(maxQty)) quantityBig = maxQty;
+
+  if (quantityBig.lte(0)) {
+    logger.warn(`[ShortTheRip] Skip | Calculated quantity is ${quantityBig.toFixed(6)}`);
+    return;
+  }
+
+  // Round quantity and prices to exchange precision
+  let quantity = parseFloat(exchange.ccxt.amountToPrecision(perpSymbol, quantityBig.toNumber()));
+  let tpPrice = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, takeProfit.toNumber()));
+  let slPrice = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, stopLoss.toNumber()));
 
   if (quantity <= 0) {
-    logger.warn(`[ShortTheRip] Skip | Calculated quantity is ${quantity}`);
+    logger.warn("[ShortTheRip] Skip | Quantity rounds to 0 after precision adjustment");
     return;
   }
 
@@ -680,8 +765,8 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
 
   logger.info(
     `[ShortTheRip] 🚨 SHORT | Score: ${score}/${params.entryScoreThreshold} [${scoreBreakdown.join(" + ")}] | ` +
-    `Entry: ${entryPrice.toFixed(2)} | SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)} | ` +
-    `Qty: ${quantity.toFixed(6)} | Risk: $${riskAmount.toFixed(2)} (${params.riskPercent}%) | ` +
+    `Entry: ${entryPrice.toFixed(2)} | SL: ${slPrice} | TP: ${tpPrice} | ` +
+    `Qty: ${quantity} | Risk: $${riskAmount.toFixed(2)} (${params.riskPercent}%) | ` +
     `Bal: ${walletBalance.toFixed(2)} ${quoteCurrency}`,
   );
 
@@ -695,14 +780,14 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
       tp: {
         type: "Limit",
         side: "Buy",
-        price: takeProfit,
+        price: tpPrice,
         symbol: perpSymbol,
       },
       sl: {
         type: "Market",
         side: "Buy",
         symbol: perpSymbol,
-        stopPrice: stopLoss,
+        stopPrice: slPrice,
       },
       quantity,
     },
@@ -711,15 +796,15 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
 
   state.phase = "POSITION_OPEN";
   state.inPosition = true;
-  state.entryPrice = entryPrice;
-  state.stopLossPrice = stopLoss;
-  state.takeProfitPrice = takeProfit;
+  state.entryPrice = entryPrice.toNumber();
+  state.stopLossPrice = slPrice;
+  state.takeProfitPrice = tpPrice;
   state.positionQuantity = quantity;
   state.lastTradeTimestamp = now;
   state.candlesSinceLastTrade = 0;
 
   logger.info(
-    `[ShortTheRip] ✅ Trade placed — SHORT ${quantity.toFixed(6)} @ market | SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)}`,
+    `[ShortTheRip] ✅ Trade placed — SHORT ${quantity} @ market | SL: ${slPrice} | TP: ${tpPrice}`,
   );
 }
 
