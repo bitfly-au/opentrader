@@ -493,7 +493,6 @@ pumpRangeScalper.schema = z.object({
   // ── Concurrency ──────────────────────────────────────────────────────
   maxConcurrentTrades: z
     .number()
-    .int()
     .positive()
     .default(5)
     .describe("Maximum number of simultaneous open short positions. Balance is divided equally across all slots."),
