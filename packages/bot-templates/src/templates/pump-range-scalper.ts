@@ -70,12 +70,18 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
     logger.info(`[PumpRangeScalper] Bot started on ${spotSymbol} (perp: ${perpSymbol})`);
     logger.info(ctx.config, "[PumpRangeScalper] Bot config");
 
-    // Initialize state (preserve counter & trades across restarts)
-    state.phase = "SCANNING";
+    // Initialize state (preserve all fields across restarts)
+    state.phase = state.phase ?? "SCANNING";
     state.openTrades = state.openTrades ?? [];
     state.tradeCounter = state.tradeCounter ?? 0;
-    state.rangeTop = undefined;
-    state.rangeBottom = undefined;
+    // rangeTop and rangeBottom are preserved from DB state
+
+    if (state.phase === "RANGE_ACTIVE" && state.rangeTop != null && state.rangeBottom != null) {
+      logger.info(
+        `[PumpRangeScalper] ♻️ Restored range from previous session: [${state.rangeBottom.toFixed(2)} — ${state.rangeTop.toFixed(2)}] | ` +
+        `Phase: ${state.phase} | Open trades: ${(state.openTrades ?? []).length}`,
+      );
+    }
 
     // Set cross margin mode & leverage
     const startExchange: IExchange = yield useExchange();
@@ -101,10 +107,8 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
     // Market-close any remaining short positions
     yield* marketCloseAllShorts(ctx, perpSymbol, quoteCurrency);
 
-    state.phase = "SCANNING";
+    // Clear trades (positions are closed) but preserve the range for restarts
     state.openTrades = [];
-    state.rangeTop = undefined;
-    state.rangeBottom = undefined;
     return;
   }
 
