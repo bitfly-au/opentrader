@@ -24,6 +24,13 @@ export interface IPlaceOrderRequest {
    * @see https://docs.ccxt.com/#/?id=market-buys
    */
   price?: number;
+  /**
+   * Extra exchange-specific parameters passed to CCXT's createOrder().
+   * For example, `{ hedged: true }` for hedge/dual-side position mode,
+   * or `{ reduceOnly: true }` for closing positions.
+   * @see https://docs.ccxt.com/#/?id=hedged-mode
+   */
+  params?: Record<string, unknown>;
 }
 
 export interface IPlaceOrderResponse {

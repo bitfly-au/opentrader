@@ -47,11 +47,7 @@ const placeOrder: Normalize["placeOrder"] = {
 
     // Some exchanges require price for Market orders to calculate the total cost of the order in the quote currency.
     // https://docs.ccxt.com/#/?id=market-buys
-    if (params.price !== undefined) {
-      return [params.symbol, orderType, params.side, params.quantity, params.price];
-    }
-
-    return [params.symbol, orderType, params.side, params.quantity];
+    return [params.symbol, orderType, params.side, params.quantity, params.price, params.params];
   },
   response: (order) => ({
     orderId: order.id,
@@ -60,7 +56,7 @@ const placeOrder: Normalize["placeOrder"] = {
 };
 
 const placeLimitOrder: Normalize["placeLimitOrder"] = {
-  request: (params) => [params.symbol, params.side, params.quantity, params.price],
+  request: (params) => [params.symbol, params.side, params.quantity, params.price, params.params],
   response: (order) => ({
     orderId: order.id,
     clientOrderId: order.clientOrderId,

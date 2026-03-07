@@ -19,3 +19,4 @@ export * from "./exchanges/index.js";
 export * from "./types/index.js";
 export * from "./cache.js";
 export * from "./exchange.provider.js";
+export { detectHedgeMode, clearHedgeModeCache } from "./utils/detect-hedge-mode.js";

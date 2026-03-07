@@ -1,7 +1,7 @@
 import { xprisma } from "@opentrader/db";
 import type { SmartTradeWithOrders, ExchangeAccountWithCredentials } from "@opentrader/db";
 import type { IExchange } from "@opentrader/exchanges";
-import { exchangeProvider } from "@opentrader/exchanges";
+import { exchangeProvider, detectHedgeMode } from "@opentrader/exchanges";
 import { logger } from "@opentrader/logger";
 import { ITicker, XEntityType } from "@opentrader/types";
 import type { ISmartTradeExecutor, SmartTradeContext } from "../smart-trade-executor.interface.js";
@@ -80,6 +80,20 @@ export class TradeExecutor implements ISmartTradeExecutor {
   }
 
   /**
+   * Builds extra CCXT params for hedge (dual-side) position mode on perp symbols.
+   * Auto-detects whether the account is in hedge mode.
+   * Entry orders get `{ hedged: true }`.
+   * TP/SL orders get `{ hedged: true, reduceOnly: true }` so CCXT maps to the correct position side.
+   * @see https://docs.ccxt.com/#/?id=hedged-mode
+   */
+  private async getHedgeParams(isReduceOnly: boolean): Promise<Record<string, unknown> | undefined> {
+    const hedged = await detectHedgeMode(this.exchange.ccxt, this.smartTrade.symbol);
+    if (!hedged) return undefined;
+
+    return isReduceOnly ? { hedged: true, reduceOnly: true } : { hedged: true };
+  }
+
+  /**
    * Places the entry order and take profit order on the exchange.
    * Returns `true` if the order was placed successfully.
    */
@@ -91,7 +105,7 @@ export class TradeExecutor implements ISmartTradeExecutor {
 
     if (entryOrder.status === "Idle") {
       const orderExecutor = new OrderExecutor(entryOrder, this.exchange, this.smartTrade.symbol);
-      await orderExecutor.place();
+      await orderExecutor.place(await this.getHedgeParams(false));
       await this.pull();
 
       const quoteLogValue = entryOrder.price ? entryOrder.quantity * entryOrder.price : "?";
@@ -103,7 +117,7 @@ export class TradeExecutor implements ISmartTradeExecutor {
       return true;
     } else if (entryOrder.status === "Filled" && takeProfitOrder?.status === "Idle") {
       const orderExecutor = new OrderExecutor(takeProfitOrder, this.exchange, this.smartTrade.symbol);
-      await orderExecutor.place();
+      await orderExecutor.place(await this.getHedgeParams(true));
       await this.pull();
 
       const quoteLogValue = takeProfitOrder.price ? takeProfitOrder.quantity * takeProfitOrder.price : "?";
@@ -129,7 +143,7 @@ export class TradeExecutor implements ISmartTradeExecutor {
 
       // Place SL
       const slOrder = new OrderExecutor(stopLossOrder, this.exchange, this.smartTrade.symbol);
-      await slOrder.place();
+      await slOrder.place(await this.getHedgeParams(true));
 
       await this.pull();
 

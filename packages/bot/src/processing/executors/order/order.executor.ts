@@ -30,8 +30,9 @@ export class OrderExecutor {
   /**
    * Places the order on the exchange and updates the status in the database.
    * Returns `true` if the order was placed successfully.
+   * @param extraParams - Extra exchange-specific parameters (e.g. `{ hedged: true }` for hedge mode)
    */
-  async place(): Promise<boolean> {
+  async place(extraParams?: Record<string, unknown>): Promise<boolean> {
     if (this.order.status !== "Idle") {
       logger.error(
         `Cannot place the order: Order { id: ${this.order.id}, status: ${this.order.status} }. Order was already placed before. Skip execution.`,
@@ -46,6 +47,7 @@ export class OrderExecutor {
         side: this.order.side === "Buy" ? "buy" : "sell",
         price: this.order.price,
         quantity: this.order.quantity,
+        params: extraParams,
       });
 
       await xprisma.order.update({
@@ -100,6 +102,7 @@ export class OrderExecutor {
         side,
         quantity: this.order.quantity,
         price: marketBuyRequiresPrice && side === "buy" ? await estimateMarketOrderPrice() : undefined,
+        params: extraParams,
       });
 
       await xprisma.order.update({

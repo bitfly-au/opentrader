@@ -1,5 +1,6 @@
 import { z } from "zod";
 import Big from "big.js";
+import { detectHedgeMode } from "@opentrader/exchanges";
 import type { IExchange } from "@opentrader/exchanges";
 import type { ICandlestick } from "@opentrader/types";
 import {
@@ -248,6 +249,7 @@ function computeVolumeTrendRatio(
 function* marketCloseShort(
   perpSymbol: string,
   quantity: number,
+  isHedgeMode?: boolean,
 ) {
   if (quantity <= 0) {
     logger.info("[ShortTheRip] No quantity to close");
@@ -261,7 +263,7 @@ function* marketCloseShort(
   const exchange: IExchange = yield useExchange();
 
   yield exchange.ccxt
-    .createOrder(perpSymbol, "market", "buy", quantity, undefined, { reduceOnly: true })
+    .createOrder(perpSymbol, "market", "buy", quantity, undefined, isHedgeMode ? { hedged: true, reduceOnly: true } : { reduceOnly: true })
     .then((order: any) => {
       logger.info(
         `[ShortTheRip] ✅ Market close order placed — Buy ${quantity} @ market | orderId: ${order?.id ?? "unknown"}`,
@@ -339,6 +341,10 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
       .then(() => logger.info(`[ShortTheRip] Leverage set to ${params.leverage}x for ${perpSymbol}`))
       .catch((err: Error) => logger.warn(`[ShortTheRip] setLeverage: ${err.message}`));
 
+    // Auto-detect hedge (dual-side) position mode (shared utility with process-level cache)
+    state.isHedgeMode = yield detectHedgeMode(startExchange.ccxt, perpSymbol);
+    logger.info(`[ShortTheRip] Position mode: ${state.isHedgeMode ? "hedge" : "one-way"}`);
+
     yield telegram.notify(formatBotStarted({ botName: "Short the Rip", symbol: perpSymbol }));
     return;
   }
@@ -349,7 +355,7 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
 
     // Market-close the short position if we have one
     if (state.inPosition && (state.positionQuantity ?? 0) > 0) {
-      yield* marketCloseShort(perpSymbol, state.positionQuantity!);
+      yield* marketCloseShort(perpSymbol, state.positionQuantity!, state.isHedgeMode);
     }
 
     state.phase = "SCANNING";
@@ -512,7 +518,7 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
 
         // Market-close the short position
         if ((state.positionQuantity ?? 0) > 0) {
-          yield* marketCloseShort(perpSymbol, state.positionQuantity!);
+          yield* marketCloseShort(perpSymbol, state.positionQuantity!, state.isHedgeMode);
         }
 
         // Estimate P&L using current close as exit
@@ -1232,6 +1238,7 @@ shortTheRip.watchers = {
 type ShortTheRipState = {
   phase?: "SCANNING" | "POSITION_OPEN";
   inPosition?: boolean;
+  isHedgeMode?: boolean;
   entryPrice?: number;
   stopLossPrice?: number;
   takeProfitPrice?: number;

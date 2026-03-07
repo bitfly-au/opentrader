@@ -1,5 +1,6 @@
 import { z } from "zod";
 import Big from "big.js";
+import { detectHedgeMode } from "@opentrader/exchanges";
 import type { IExchange } from "@opentrader/exchanges";
 import type { ICandlestick } from "@opentrader/types";
 import {
@@ -106,6 +107,10 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
       .setLeverage(params.leverage, perpSymbol)
       .then(() => logger.info(`[PumpRangeScalper] Leverage set to ${params.leverage}x for ${perpSymbol}`))
       .catch((err: Error) => logger.warn(`[PumpRangeScalper] setLeverage: ${err.message}`));
+
+    // Auto-detect hedge (dual-side) position mode (shared utility with process-level cache)
+    state.isHedgeMode = yield detectHedgeMode(startExchange.ccxt, perpSymbol);
+    logger.info(`[PumpRangeScalper] Position mode: ${state.isHedgeMode ? "hedge" : "one-way"}`);
 
     yield telegram.notify(formatBotStarted({ botName: "Pump Range Scalper", symbol: perpSymbol }));
     return;
@@ -465,7 +470,7 @@ function* marketCloseAllShorts(
 
   // Place a single market buy to close all shorts
   yield exchange.ccxt
-    .createOrder(perpSymbol, "market", "buy", totalQtyNum, undefined, { reduceOnly: true })
+    .createOrder(perpSymbol, "market", "buy", totalQtyNum, undefined, state.isHedgeMode ? { hedged: true, reduceOnly: true } : { reduceOnly: true })
     .then((order: any) => {
       logger.info(
         `[PumpRangeScalper] ✅ Market close order placed — Buy ${totalQty.toFixed(6)} @ market | orderId: ${order?.id ?? "unknown"}`,
@@ -619,6 +624,7 @@ type PumpRangeScalperState = {
   rangeBottom?: number;
   openTrades?: TradeRecord[];
   tradeCounter?: number;
+  isHedgeMode?: boolean;
 };
 
 export type PumpRangeScalperConfig = IBotConfiguration<z.infer<typeof pumpRangeScalper.schema>>;

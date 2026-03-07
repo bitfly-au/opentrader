@@ -1,5 +1,6 @@
 import { z } from "zod";
 import Big from "big.js";
+import { detectHedgeMode } from "@opentrader/exchanges";
 import type { IExchange } from "@opentrader/exchanges";
 import type { ICandlestick } from "@opentrader/types";
 import {
@@ -75,7 +76,7 @@ function* marketCloseAllPositions(
       `[VolumeSpike] Market-closing ${totalLongQty.toFixed(6)} long position on ${perpSymbol}`,
     );
     yield exchange.ccxt
-      .createOrder(perpSymbol, "market", "sell", totalLongQty.toNumber(), undefined, { reduceOnly: true })
+      .createOrder(perpSymbol, "market", "sell", totalLongQty.toNumber(), undefined, state.isHedgeMode ? { hedged: true, reduceOnly: true } : { reduceOnly: true })
       .then((order: any) => {
         logger.info(
           `[VolumeSpike] ✅ Market close (long) — Sell ${totalLongQty.toFixed(6)} @ market | orderId: ${order?.id ?? "unknown"}`,
@@ -92,7 +93,7 @@ function* marketCloseAllPositions(
       `[VolumeSpike] Market-closing ${totalShortQty.toFixed(6)} short position on ${perpSymbol}`,
     );
     yield exchange.ccxt
-      .createOrder(perpSymbol, "market", "buy", totalShortQty.toNumber(), undefined, { reduceOnly: true })
+      .createOrder(perpSymbol, "market", "buy", totalShortQty.toNumber(), undefined, state.isHedgeMode ? { hedged: true, reduceOnly: true } : { reduceOnly: true })
       .then((order: any) => {
         logger.info(
           `[VolumeSpike] ✅ Market close (short) — Buy ${totalShortQty.toFixed(6)} @ market | orderId: ${order?.id ?? "unknown"}`,
@@ -159,6 +160,10 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
       .setLeverage(params.leverage, perpSymbol)
       .then(() => logger.info(`[VolumeSpike] Leverage set to ${params.leverage}x for ${perpSymbol}`))
       .catch((err: Error) => logger.warn(`[VolumeSpike] setLeverage: ${err.message}`));
+
+    // Auto-detect hedge (dual-side) position mode (shared utility with process-level cache)
+    state.isHedgeMode = yield detectHedgeMode(startExchange.ccxt, perpSymbol);
+    logger.info(`[VolumeSpike] Position mode: ${state.isHedgeMode ? "hedge" : "one-way"}`);
 
     yield telegram.notify(formatBotStarted({ botName: "Volume Spike", symbol: perpSymbol }));
     return;
@@ -566,6 +571,7 @@ type TradeRecord = {
 type VolumeSpikeState = {
   openTrades?: TradeRecord[];
   tradeCounter?: number;
+  isHedgeMode?: boolean;
 };
 
 export type VolumeSpikeConfig = IBotConfiguration<z.infer<typeof volumeSpike.schema>>;
