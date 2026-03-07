@@ -15,6 +15,17 @@ import {
   type CancelAllTradesResult,
 } from "@opentrader/bot-processor";
 import { logger } from "@opentrader/logger";
+import {
+  telegram,
+  formatTradeEntry,
+  formatTakeProfit,
+  formatStopLoss,
+  formatMissedOpportunity,
+  formatBotStarted,
+  formatBotStopped,
+  formatNewRange,
+  formatRangeReplaced,
+} from "@opentrader/telegram";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Helper utilities
@@ -96,6 +107,7 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
       .then(() => logger.info(`[PumpRangeScalper] Leverage set to ${params.leverage}x for ${perpSymbol}`))
       .catch((err: Error) => logger.warn(`[PumpRangeScalper] setLeverage: ${err.message}`));
 
+    yield telegram.notify(formatBotStarted({ botName: "Pump Range Scalper", symbol: perpSymbol }));
     return;
   }
 
@@ -109,6 +121,7 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
 
     // Clear trades (positions are closed) but preserve the range for restarts
     state.openTrades = [];
+    yield telegram.notify(formatBotStopped({ botName: "Pump Range Scalper", symbol: perpSymbol }));
     return;
   }
 
@@ -122,6 +135,16 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
       const existingTrade: SmartTradeService | null = yield getSmartTrade(trade.ref);
       if (existingTrade && existingTrade.isCompleted()) {
         logger.info(`[PumpRangeScalper] ✅ Trade ${trade.ref} completed (TP filled)`);
+        const tpPrice = trade.entryPrice * (1 - params.tpDropPercent);
+        yield telegram.notify(formatTakeProfit({
+          botName: "Pump Range Scalper",
+          symbol: perpSymbol,
+          direction: "SHORT",
+          entryPrice: trade.entryPrice,
+          exitPrice: tpPrice,
+          quantity: trade.quantity,
+          ref: trade.ref,
+        }));
       } else {
         stillOpen.push(trade);
       }
@@ -179,7 +202,22 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
       // Market-close the aggregate short position
       yield* marketCloseAllShorts(ctx, perpSymbol, quoteCurrency);
 
+      yield telegram.notify(formatRangeReplaced({
+        botName: "Pump Range Scalper",
+        symbol: perpSymbol,
+        rangeTop: newRangeTop,
+        rangeBottom: newRangeBottom,
+        closedTrades: state.openTrades!.length,
+      }));
+
       state.openTrades = [];
+    } else {
+      yield telegram.notify(formatNewRange({
+        botName: "Pump Range Scalper",
+        symbol: perpSymbol,
+        rangeTop: newRangeTop,
+        rangeBottom: newRangeBottom,
+      }));
     }
 
     // Establish the new range
@@ -222,6 +260,16 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
     // Market-close all shorts
     yield* marketCloseAllShorts(ctx, perpSymbol, quoteCurrency);
 
+    yield telegram.notify(formatStopLoss({
+      botName: "Pump Range Scalper",
+      symbol: perpSymbol,
+      direction: "SHORT",
+      entryPrice: 0,
+      exitPrice: currentPrice,
+      quantity: 0,
+      extraInfo: `Price ${currentPrice.toFixed(2)} breached SL ceiling ${stopLossCeiling.toFixed(2)} — all shorts market-closed`,
+    }));
+
     state.openTrades = [];
     state.phase = "SCANNING";
     state.rangeTop = undefined;
@@ -247,6 +295,11 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
       `[PumpRangeScalper] Skip | At max concurrent trades (${openCount}/${params.maxConcurrentTrades}) | ` +
       `Price: ${currentPrice.toFixed(2)} | Range: [${rangeBottom.toFixed(2)} — ${rangeTop.toFixed(2)}]`,
     );
+    yield telegram.notify(formatMissedOpportunity({
+      botName: "Pump Range Scalper",
+      symbol: perpSymbol,
+      reason: `Max concurrent trades reached (${openCount}/${params.maxConcurrentTrades})`,
+    }));
     return;
   }
 
@@ -281,6 +334,12 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
 
   if (walletBalance.lte(0)) {
     logger.warn(`[PumpRangeScalper] Skip | No ${quoteCurrency} balance (${walletBalance.toFixed(2)})`);
+    yield telegram.notify(formatMissedOpportunity({
+      botName: "Pump Range Scalper",
+      symbol: perpSymbol,
+      reason: `Insufficient ${quoteCurrency} balance`,
+      details: `Signal: SHORT @ ${currentPrice.toFixed(2)} — but balance is ${walletBalance.toFixed(2)}`,
+    }));
     return;
   }
 
@@ -358,6 +417,17 @@ export function* pumpRangeScalper(ctx: TBotContext<PumpRangeScalperConfig, PumpR
     `[PumpRangeScalper] ✅ Trade ${tradeRef} placed — SHORT ${quantity.toFixed(6)} @ market | TP: ${tpPrice.toFixed(2)} | ` +
     `Total open trades: ${state.openTrades.length}`,
   );
+
+  yield telegram.notify(formatTradeEntry({
+    botName: "Pump Range Scalper",
+    symbol: perpSymbol,
+    direction: "SHORT",
+    entryPrice: currentPrice,
+    tpPrice,
+    quantity,
+    ref: tradeRef,
+    extraInfo: `Range: [${rangeBottom.toFixed(2)} — ${rangeTop.toFixed(2)}] | Slot: ${state.openTrades.length}/${params.maxConcurrentTrades}`,
+  }));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

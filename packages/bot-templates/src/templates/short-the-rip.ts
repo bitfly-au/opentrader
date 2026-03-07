@@ -12,6 +12,16 @@ import {
   type SmartTradeService,
 } from "@opentrader/bot-processor";
 import { logger } from "@opentrader/logger";
+import {
+  telegram,
+  formatTradeEntry,
+  formatTakeProfit,
+  formatStopLoss,
+  formatMissedOpportunity,
+  formatBotStarted,
+  formatBotStopped,
+  formatCircuitBreaker,
+} from "@opentrader/telegram";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Helper utilities
@@ -329,6 +339,7 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
       .then(() => logger.info(`[ShortTheRip] Leverage set to ${params.leverage}x for ${perpSymbol}`))
       .catch((err: Error) => logger.warn(`[ShortTheRip] setLeverage: ${err.message}`));
 
+    yield telegram.notify(formatBotStarted({ botName: "Short the Rip", symbol: perpSymbol }));
     return;
   }
 
@@ -343,6 +354,7 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
 
     state.phase = "SCANNING";
     state.inPosition = false;
+    yield telegram.notify(formatBotStopped({ botName: "Short the Rip", symbol: perpSymbol }));
     return;
   }
 
@@ -371,11 +383,27 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
         if (wasProfit) {
           state.consecutiveLosses = 0;
           logger.info("[ShortTheRip] ✅ Trade completed — PROFIT");
+          yield telegram.notify(formatTakeProfit({
+            botName: "Short the Rip",
+            symbol: perpSymbol,
+            direction: "SHORT",
+            entryPrice: state.entryPrice ?? 0,
+            exitPrice: state.takeProfitPrice ?? 0,
+            quantity: state.positionQuantity ?? 0,
+          }));
         } else {
           state.consecutiveLosses = (state.consecutiveLosses ?? 0) + 1;
           logger.info(
             `[ShortTheRip] ❌ Trade completed — LOSS (consecutive: ${state.consecutiveLosses})`,
           );
+          yield telegram.notify(formatStopLoss({
+            botName: "Short the Rip",
+            symbol: perpSymbol,
+            direction: "SHORT",
+            entryPrice: state.entryPrice ?? 0,
+            exitPrice: state.stopLossPrice ?? 0,
+            quantity: state.positionQuantity ?? 0,
+          }));
         }
 
         state.inPosition = false;
@@ -676,6 +704,12 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   }
 
   if (volumeAborted) {
+    yield telegram.notify(formatMissedOpportunity({
+      botName: "Short the Rip",
+      symbol: perpSymbol,
+      reason: "Volume surge abort — bounce has too much momentum",
+      details: `Score: ${score}/${params.entryScoreThreshold} [${scoreBreakdown.join(" + ")}]`,
+    }));
     return;
   }
 
@@ -731,6 +765,12 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
 
   if (walletBalance.lte(0)) {
     logger.warn(`[ShortTheRip] Skip | No ${quoteCurrency} balance (${walletBalance.toFixed(2)})`);
+    yield telegram.notify(formatMissedOpportunity({
+      botName: "Short the Rip",
+      symbol: perpSymbol,
+      reason: `Insufficient ${quoteCurrency} balance`,
+      details: `Score: ${score}/${params.entryScoreThreshold} [${scoreBreakdown.join(" + ")}] — but balance is ${walletBalance.toFixed(2)}`,
+    }));
     return;
   }
 
@@ -806,6 +846,17 @@ export function* shortTheRip(ctx: TBotContext<ShortTheRipConfig, ShortTheRipStat
   logger.info(
     `[ShortTheRip] ✅ Trade placed — SHORT ${quantity} @ market | SL: ${slPrice} | TP: ${tpPrice}`,
   );
+
+  yield telegram.notify(formatTradeEntry({
+    botName: "Short the Rip",
+    symbol: perpSymbol,
+    direction: "SHORT",
+    entryPrice: entryPrice.toNumber(),
+    tpPrice,
+    slPrice,
+    quantity,
+    extraInfo: `Score: ${score}/${params.entryScoreThreshold} [${scoreBreakdown.join(" + ")}] | Risk: $${riskAmount.toFixed(2)} (${params.riskPercent}%)`,
+  }));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

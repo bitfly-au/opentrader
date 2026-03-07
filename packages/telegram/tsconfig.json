@@ -1,0 +1,21 @@
+{
+  "extends": "@opentrader/tsconfig/esm.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "outDir": "../../dts/packages/telegram",
+    "paths": {
+      "@opentrader/tsconfig/*": ["../tsconfig/*"],
+      "@opentrader/logger": ["../logger/src/index.ts"],
+      "@opentrader/logger/*": ["../logger/src/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  "references": [
+    {
+      "path": "../tsconfig"
+    },
+    {
+      "path": "../logger"
+    }
+  ]
+}

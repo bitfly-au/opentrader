@@ -16,6 +16,8 @@
       "@opentrader/exchanges/*": ["../exchanges/src/*"],
       "@opentrader/prisma": ["../prisma/src/index.ts"],
       "@opentrader/prisma/*": ["../prisma/src/*"],
+      "@opentrader/telegram": ["../telegram/src/index.ts"],
+      "@opentrader/telegram/*": ["../telegram/src/*"],
       "@opentrader/tools": ["../tools/src/index.ts"],
       "@opentrader/tools/*": ["../tools/src/*"],
       "@opentrader/tsconfig/*": ["../tsconfig/*"],
@@ -47,6 +49,9 @@
     },
     {
       "path": "../prisma"
+    },
+    {
+      "path": "../telegram"
     },
     {
       "path": "../tools"

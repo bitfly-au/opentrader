@@ -15,6 +15,14 @@ import {
   type CancelAllTradesResult,
 } from "@opentrader/bot-processor";
 import { logger } from "@opentrader/logger";
+import {
+  telegram,
+  formatTradeEntry,
+  formatTakeProfit,
+  formatMissedOpportunity,
+  formatBotStarted,
+  formatBotStopped,
+} from "@opentrader/telegram";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Helper utilities
@@ -152,6 +160,7 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
       .then(() => logger.info(`[VolumeSpike] Leverage set to ${params.leverage}x for ${perpSymbol}`))
       .catch((err: Error) => logger.warn(`[VolumeSpike] setLeverage: ${err.message}`));
 
+    yield telegram.notify(formatBotStarted({ botName: "Volume Spike", symbol: perpSymbol }));
     return;
   }
 
@@ -163,6 +172,7 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
     // Market-close any remaining positions
     yield* marketCloseAllPositions(state, perpSymbol);
 
+    yield telegram.notify(formatBotStopped({ botName: "Volume Spike", symbol: perpSymbol }));
     state.openTrades = [];
     return;
   }
@@ -176,6 +186,15 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
       const existingTrade: SmartTradeService | null = yield getSmartTrade(trade.ref);
       if (existingTrade && existingTrade.isCompleted()) {
         logger.info(`[VolumeSpike] ✅ Trade ${trade.ref} completed (TP filled) — ${trade.direction.toUpperCase()}`);
+        yield telegram.notify(formatTakeProfit({
+          botName: "Volume Spike",
+          symbol: perpSymbol,
+          direction: trade.direction === "long" ? "LONG" : "SHORT",
+          entryPrice: trade.entryPrice,
+          exitPrice: trade.tpPrice,
+          quantity: trade.quantity,
+          ref: trade.ref,
+        }));
       } else {
         stillOpen.push(trade);
       }
@@ -205,6 +224,11 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
     logger.info(
       `[VolumeSpike] Skip | At max concurrent trades (${openCount}/${params.maxConcurrentTrades})`,
     );
+    yield telegram.notify(formatMissedOpportunity({
+      botName: "Volume Spike",
+      symbol: perpSymbol,
+      reason: `Max concurrent trades reached (${openCount}/${params.maxConcurrentTrades})`,
+    }));
     return;
   }
 
@@ -293,6 +317,12 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
 
   if (walletBalance.lte(0)) {
     logger.warn(`[VolumeSpike] Skip | No ${quoteCurrency} balance (${walletBalance.toFixed(2)})`);
+    yield telegram.notify(formatMissedOpportunity({
+      botName: "Volume Spike",
+      symbol: perpSymbol,
+      reason: `Insufficient ${quoteCurrency} balance`,
+      details: `Signal: ${direction.toUpperCase()} @ ${entryPrice.toFixed(2)} — but balance is ${walletBalance.toFixed(2)}`,
+    }));
     return;
   }
 
@@ -391,6 +421,17 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
     `[VolumeSpike] ✅ Trade ${tradeRef} placed — ${direction.toUpperCase()} ${quantity.toFixed(6)} @ market, TP @ ${tpPrice.toFixed(4)} | ` +
     `Total open trades: ${state.openTrades.length}`,
   );
+
+  yield telegram.notify(formatTradeEntry({
+    botName: "Volume Spike",
+    symbol: perpSymbol,
+    direction: direction === "long" ? "LONG" : "SHORT",
+    entryPrice: entryPrice.toNumber(),
+    tpPrice,
+    quantity,
+    ref: tradeRef,
+    extraInfo: `Slot: ${state.openTrades.length}/${params.maxConcurrentTrades} | Bal: ${walletBalance.toFixed(2)} ${quoteCurrency}`,
+  }));
 }
 
 // ── Strategy metadata ──────────────────────────────────────────────────────
