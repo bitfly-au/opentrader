@@ -7,6 +7,7 @@ import { xprisma } from "@opentrader/db";
 import { logger } from "@opentrader/logger";
 import {
   XOrderStatus,
+  type BarSize,
   type ExchangeCode,
   type MarketData,
   type MarketId,
@@ -188,6 +189,7 @@ export class BotProcessing {
     const configuration: IBotConfiguration = {
       id: this.bot.id,
       symbol: this.bot.symbol,
+      timeframe: this.bot.timeframe as BarSize | null,
       settings: this.bot.settings,
       exchangeCode: exchangeAccount.exchangeCode as ExchangeCode,
     };
