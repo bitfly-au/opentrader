@@ -18,8 +18,6 @@ import {
   telegram,
   formatBotStarted,
   formatBotStopped,
-  formatStopLoss,
-  formatTakeProfit,
   formatTradeEntry,
 } from "@opentrader/telegram";
 import { getQuoteCurrency, toPerpSymbol } from "./utils.js";
@@ -283,6 +281,176 @@ function isSmartTradeClosed(trade: SmartTradeService): boolean {
   );
 }
 
+function formatTradePlanDetails({
+  direction,
+  entryPrice,
+  stopLossPrice,
+  takeProfitPrice,
+  quantity,
+  ref,
+}: {
+  direction: TradeDirection;
+  entryPrice: number | string;
+  stopLossPrice: number | string;
+  takeProfitPrice: number | string;
+  quantity: number | string;
+  ref?: string;
+}): string[] {
+  return [
+    `Direction: ${direction.toUpperCase()}`,
+    `Entry price: ${entryPrice}`,
+    `Quantity: ${quantity}`,
+    `Stop loss: ${stopLossPrice}`,
+    `Take profit: ${takeProfitPrice}`,
+    ...(ref ? [`Ref: ${ref}`] : []),
+  ];
+}
+
+function formatSignalDetected({
+  symbol,
+  timeframe,
+  direction,
+  price,
+  indicators,
+}: {
+  symbol: string;
+  timeframe: BarSize;
+  direction: TradeDirection;
+  price: Big;
+  indicators: IndicatorSnapshot;
+}): string {
+  return [
+    "ADX DI ATR Trend signal detected",
+    `Symbol: ${symbol}`,
+    `Timeframe: ${timeframe}`,
+    `Direction: ${direction.toUpperCase()}`,
+    `Signal price: ${price.toFixed(4)}`,
+    `ADX: ${indicators.adx.toFixed(2)} | slope: ${indicators.adxSlope.toFixed(2)}`,
+    `+DI: ${indicators.plusDI.toFixed(2)} | -DI: ${indicators.minusDI.toFixed(2)} | ATR: ${indicators.atr.toFixed(4)}`,
+  ].join("\n");
+}
+
+function formatMissedEntrySignal({
+  symbol,
+  timeframe,
+  direction,
+  reason,
+  price,
+  stopLossPrice,
+  takeProfitPrice,
+  quantity,
+  indicators,
+  details,
+}: {
+  symbol: string;
+  timeframe: BarSize;
+  direction: TradeDirection;
+  reason: string;
+  price: number | string;
+  stopLossPrice: number | string;
+  takeProfitPrice: number | string;
+  quantity: number | string;
+  indicators: IndicatorSnapshot;
+  details?: string[];
+}): string {
+  return [
+    "ADX DI ATR Trend missed entry signal",
+    `Symbol: ${symbol}`,
+    `Timeframe: ${timeframe}`,
+    `Reason: ${reason}`,
+    ...formatTradePlanDetails({
+      direction,
+      entryPrice: price,
+      stopLossPrice,
+      takeProfitPrice,
+      quantity,
+    }),
+    `ADX: ${indicators.adx.toFixed(2)} | slope: ${indicators.adxSlope.toFixed(2)}`,
+    `+DI: ${indicators.plusDI.toFixed(2)} | -DI: ${indicators.minusDI.toFixed(2)} | ATR: ${indicators.atr.toFixed(4)}`,
+    ...(details?.length ? details : []),
+  ].join("\n");
+}
+
+function formatSmartTradeLegsPlaced({
+  symbol,
+  plan,
+  quoteCurrency,
+  ref,
+}: {
+  symbol: string;
+  plan: TradePlan;
+  quoteCurrency: string;
+  ref: string;
+}): string {
+  return [
+    "ADX DI ATR Trend SmartTrade opened; TP/SL planned via SmartTrade",
+    `Symbol: ${symbol}`,
+    ...formatTradePlanDetails({
+      direction: plan.direction,
+      entryPrice: plan.entryPrice,
+      stopLossPrice: plan.stopLossPrice,
+      takeProfitPrice: plan.takeProfitPrice,
+      quantity: plan.quantity,
+      ref,
+    }),
+    `Stop loss order: Market ${plan.direction === "long" ? "SELL" : "BUY"} stop @ ${plan.stopLossPrice}`,
+    `Take profit order: Limit ${plan.direction === "long" ? "SELL" : "BUY"} @ ${plan.takeProfitPrice}`,
+    `Wallet: ${plan.walletBalance.toFixed(2)} ${quoteCurrency} | Risk budget: ${plan.riskBudget.toFixed(2)} ${quoteCurrency}`,
+    `Effective leverage: ${plan.effectiveLeverage.toFixed(2)}x | Leverage capped: ${plan.leverageCapped ? "yes" : "no"}`,
+  ].join("\n");
+}
+
+function formatStopLossUpdated({
+  symbol,
+  slot,
+  previousStop,
+  newStop,
+  ref,
+  reason,
+}: {
+  symbol: string;
+  slot: AdxDiAtrTradeSlot;
+  previousStop?: number;
+  newStop: number;
+  ref: string;
+  reason: string;
+}): string {
+  return [
+    "ADX DI ATR Trend stop loss updated via SmartTrade",
+    `Symbol: ${symbol}`,
+    `Direction: ${slot.direction.toUpperCase()}`,
+    `Reason: ${reason}`,
+    `Previous stop: ${previousStop ?? "unknown"}`,
+    `New stop: ${newStop}`,
+    `Take profit remains: ${slot.takeProfitPrice ?? "unknown"}`,
+    `Quantity: ${slot.quantity ?? 0}`,
+    `Ref: ${ref}`,
+  ].join("\n");
+}
+
+function formatTakeProfitUpdated({
+  symbol,
+  slot,
+  ref,
+  reason,
+}: {
+  symbol: string;
+  slot: AdxDiAtrTradeSlot;
+  ref: string;
+  reason: string;
+}): string {
+  return [
+    "ADX DI ATR Trend take profit order refreshed via SmartTrade",
+    `Symbol: ${symbol}`,
+    `Direction: ${slot.direction.toUpperCase()}`,
+    `Reason: ${reason}`,
+    `Take profit: ${slot.takeProfitPrice ?? "unknown"}`,
+    `Stop loss: ${slot.stopLossPrice ?? "unknown"}`,
+    `Quantity: ${slot.quantity ?? 0}`,
+    `Ref: ${ref}`,
+  ].join("\n");
+}
+
 // ── Signal Detection Helpers ─────────────────────────────────────────────
 
 /**
@@ -386,26 +554,28 @@ function* settleClosedTrade(
 
   if (slot.entryPrice != null && slot.quantity != null) {
     if (exitOrder?.entityType === "TakeProfitOrder" && slot.takeProfitPrice != null) {
-      yield telegram.notify(
-        formatTakeProfit({
-          botName: "ADX DI ATR Trend",
-          symbol: perpSymbol,
-          direction,
-          entryPrice: slot.entryPrice,
-          exitPrice: slot.takeProfitPrice,
-          quantity: slot.quantity,
-        }),
+      yield telegram.notifyPlain(
+        [
+          "ADX DI ATR Trend take profit filled",
+          `Symbol: ${perpSymbol}`,
+          `Direction: ${direction}`,
+          `Entry price: ${slot.entryPrice}`,
+          `Take profit fill price: ${slot.takeProfitPrice}`,
+          `Quantity: ${slot.quantity}`,
+          `Ref: ${slot.ref}`,
+        ].join("\n"),
       );
     } else if (exitOrder?.entityType === "StopLossOrder" && slot.stopLossPrice != null) {
-      yield telegram.notify(
-        formatStopLoss({
-          botName: "ADX DI ATR Trend",
-          symbol: perpSymbol,
-          direction,
-          entryPrice: slot.entryPrice,
-          exitPrice: slot.stopLossPrice,
-          quantity: slot.quantity,
-        }),
+      yield telegram.notifyPlain(
+        [
+          "ADX DI ATR Trend stop loss filled",
+          `Symbol: ${perpSymbol}`,
+          `Direction: ${direction}`,
+          `Entry price: ${slot.entryPrice}`,
+          `Stop loss fill price: ${slot.stopLossPrice}`,
+          `Quantity: ${slot.quantity}`,
+          `Ref: ${slot.ref}`,
+        ].join("\n"),
       );
     }
   }
@@ -495,7 +665,7 @@ function* buildTradePlan({
   currentPrice: Big;
   indicators: IndicatorSnapshot;
   params: AdxDiAtrSettings;
-}): Generator<any, TradePlan | null, any> {
+}): Generator<any, TradePlanBuildResult, any> {
   const atr = indicators.atr;
   const stopLoss =
     direction === "long"
@@ -507,9 +677,22 @@ function* buildTradePlan({
       : currentPrice.minus(atr.times(params.takeProfitAtrMultiplier));
 
   if (stopLoss.lte(0) || takeProfit.lte(0)) {
-    logger.warn(`[AdxDiAtr] Invalid risk prices | SL ${stopLoss.toFixed(4)} | TP ${takeProfit.toFixed(4)}`);
-    return null;
+    const reason = `invalid risk prices (SL ${stopLoss.toFixed(4)}, TP ${takeProfit.toFixed(4)})`;
+    logger.warn(`[AdxDiAtr] Skip | ${reason}`);
+    return {
+      missed: {
+        reason,
+        direction,
+        entryPrice: bigToNumber(currentPrice),
+        stopLossPrice: stopLoss.toFixed(4),
+        takeProfitPrice: takeProfit.toFixed(4),
+        quantity: 0,
+      },
+    };
   }
+
+  const stopLossPrice = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, bigToNumber(stopLoss)));
+  const takeProfitPrice = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, bigToNumber(takeProfit)));
 
   const rawBalance: Record<string, any> | null = yield exchange.ccxt
     .fetchBalance({ type: "swap" })
@@ -521,18 +704,38 @@ function* buildTradePlan({
   const walletBalance = new Big(rawBalance ? (rawBalance[quoteCurrency]?.free ?? 0) : 0);
 
   if (walletBalance.lte(0)) {
-    logger.warn(`[AdxDiAtr] Skip | No ${quoteCurrency} balance (${walletBalance.toFixed(2)})`);
-    return null;
+    const reason = `no ${quoteCurrency} balance (${walletBalance.toFixed(2)})`;
+    logger.warn(`[AdxDiAtr] Skip | ${reason}`);
+    return {
+      missed: {
+        reason,
+        direction,
+        entryPrice: bigToNumber(currentPrice),
+        stopLossPrice,
+        takeProfitPrice,
+        quantity: 0,
+        walletBalance,
+      },
+    };
   }
 
-  const stopLossPrice = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, bigToNumber(stopLoss)));
-  const takeProfitPrice = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, bigToNumber(takeProfit)));
   const preciseStopLoss = new Big(stopLossPrice);
   const stopDistance = currentPrice.minus(preciseStopLoss).abs();
 
   if (stopDistance.lte(0)) {
-    logger.warn(`[AdxDiAtr] Skip | Stop-loss distance is ${stopDistance.toFixed(8)}`);
-    return null;
+    const reason = `stop-loss distance invalid (${stopDistance.toFixed(8)})`;
+    logger.warn(`[AdxDiAtr] Skip | ${reason}`);
+    return {
+      missed: {
+        reason,
+        direction,
+        entryPrice: bigToNumber(currentPrice),
+        stopLossPrice,
+        takeProfitPrice,
+        quantity: 0,
+        walletBalance,
+      },
+    };
   }
 
   const riskBudget = walletBalance.times(params.riskFractionOfBalance);
@@ -542,15 +745,40 @@ function* buildTradePlan({
   const quantityBig = qtyRisk.gt(qtyLevCap) ? qtyLevCap : qtyRisk;
 
   if (quantityBig.lte(0)) {
-    logger.warn(`[AdxDiAtr] Skip | Calculated quantity is ${quantityBig.toFixed(6)}`);
-    return null;
+    const reason = `calculated quantity is zero or invalid (${quantityBig.toFixed(6)})`;
+    logger.warn(`[AdxDiAtr] Skip | ${reason}`);
+    return {
+      missed: {
+        reason,
+        direction,
+        entryPrice: bigToNumber(currentPrice),
+        stopLossPrice,
+        takeProfitPrice,
+        quantity: quantityBig.toFixed(6),
+        walletBalance,
+        riskBudget,
+      },
+    };
   }
 
   const quantity = parseFloat(exchange.ccxt.amountToPrecision(perpSymbol, bigToNumber(quantityBig)));
 
   if (quantity <= 0) {
-    logger.warn("[AdxDiAtr] Quantity rounds to 0 after precision adjustment");
-    return null;
+    const reason = `quantity rounds to zero after precision adjustment (raw ${quantityBig.toFixed(8)})`;
+    logger.warn(`[AdxDiAtr] Skip | ${reason}`);
+    return {
+      missed: {
+        reason,
+        direction,
+        entryPrice: bigToNumber(currentPrice),
+        stopLossPrice,
+        takeProfitPrice,
+        quantity: 0,
+        rawQuantity: quantityBig,
+        walletBalance,
+        riskBudget,
+      },
+    };
   }
 
   const quantityPrecise = new Big(quantity);
@@ -558,16 +786,18 @@ function* buildTradePlan({
   const effectiveLeverage = walletBalance.gt(0) ? notional.div(walletBalance) : new Big(0);
 
   return {
-    direction,
-    entryPrice: bigToNumber(currentPrice),
-    stopLossPrice,
-    takeProfitPrice,
-    quantity,
-    walletBalance,
-    riskBudget,
-    configuredLeverage,
-    effectiveLeverage,
-    leverageCapped: qtyRisk.gt(qtyLevCap),
+    plan: {
+      direction,
+      entryPrice: bigToNumber(currentPrice),
+      stopLossPrice,
+      takeProfitPrice,
+      quantity,
+      walletBalance,
+      riskBudget,
+      configuredLeverage,
+      effectiveLeverage,
+      leverageCapped: qtyRisk.gt(qtyLevCap),
+    },
   };
 }
 
@@ -654,6 +884,15 @@ function* openDirectionalTrade({
         `Leverage capped: ${plan.leverageCapped ? "yes" : "no"} | Ref: ${ref}`,
     }),
   );
+
+  yield telegram.notifyPlain(
+    formatSmartTradeLegsPlaced({
+      symbol: perpSymbol,
+      plan,
+      quoteCurrency,
+      ref,
+    }),
+  );
 }
 
 /**
@@ -712,6 +951,7 @@ function* manageOpenTradeSlot({
     const entrySide = slot.direction === "long" ? "Buy" : "Sell";
     const exitSide = slot.direction === "long" ? "Sell" : "Buy";
     const breakevenStop = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, bigToNumber(entryPrice)));
+    const previousStop = slot.stopLossPrice;
 
     logger.info(`[AdxDiAtr] Moving ${slot.direction.toUpperCase()} stop to breakeven at ${breakevenStop}`);
     yield cancelSmartTrade(ref);
@@ -745,14 +985,22 @@ function* manageOpenTradeSlot({
     setTradeSlot(state, slot.direction, slot);
     syncLegacyStateFromSlots(state);
     yield telegram.notifyPlain(
-      [
-        "ADX DI ATR Trend stop moved to breakeven",
-        `Symbol: ${perpSymbol}`,
-        `Direction: ${slot.direction.toUpperCase()}`,
-        `Stop: ${breakevenStop}`,
-        `Quantity: ${slot.quantity ?? 0}`,
-        `Ref: ${ref}`,
-      ].join("\n"),
+      formatStopLossUpdated({
+        symbol: perpSymbol,
+        slot,
+        previousStop,
+        newStop: breakevenStop,
+        ref,
+        reason: `breakeven trigger reached (${params.breakevenAtrMultiplier} ATR)`,
+      }),
+    );
+    yield telegram.notifyPlain(
+      formatTakeProfitUpdated({
+        symbol: perpSymbol,
+        slot,
+        ref,
+        reason: "SmartTrade refreshed after stop-loss update",
+      }),
     );
   }
 }
@@ -892,14 +1140,17 @@ export function* adxDiAtr(ctx: TBotContext<AdxDiAtrConfig, AdxDiAtrState>): Gene
     return;
   }
 
-  if (getTradeSlot(state, direction)?.inPosition) {
-    logger.info(
-      `[AdxDiAtr] ${direction.toUpperCase()} signal present, but ${getTradeRef(direction)} slot is already active`,
-    );
-    return;
-  }
+  yield telegram.notifyPlain(
+    formatSignalDetected({
+      symbol: perpSymbol,
+      timeframe,
+      direction,
+      price: currentPrice,
+      indicators,
+    }),
+  );
 
-  const plan: TradePlan | null = yield* buildTradePlan({
+  const planResult: TradePlanBuildResult = yield* buildTradePlan({
     exchange,
     perpSymbol,
     quoteCurrency,
@@ -908,14 +1159,70 @@ export function* adxDiAtr(ctx: TBotContext<AdxDiAtrConfig, AdxDiAtrState>): Gene
     indicators,
     params,
   });
-  if (!plan) return;
+
+  const activeSlot = getTradeSlot(state, direction);
+  if (activeSlot?.inPosition) {
+    logger.info(
+      `[AdxDiAtr] ${direction.toUpperCase()} signal present, but ${getTradeRef(direction)} slot is already active`,
+    );
+    const plan = planResult.plan;
+    const missed = planResult.missed;
+    yield telegram.notifyPlain(
+      formatMissedEntrySignal({
+        symbol: perpSymbol,
+        timeframe,
+        direction,
+        reason: `${getTradeRef(direction)} slot already active`,
+        price: plan?.entryPrice ?? missed?.entryPrice ?? currentPrice.toFixed(4),
+        stopLossPrice: plan?.stopLossPrice ?? missed?.stopLossPrice ?? "unknown",
+        takeProfitPrice: plan?.takeProfitPrice ?? missed?.takeProfitPrice ?? "unknown",
+        quantity: plan?.quantity ?? missed?.quantity ?? "unknown",
+        indicators,
+        details: [
+          `Active quantity: ${activeSlot.quantity ?? "unknown"}`,
+          `Active entry: ${activeSlot.entryPrice ?? "unknown"}`,
+          `Active SL: ${activeSlot.stopLossPrice ?? "unknown"}`,
+          `Active TP: ${activeSlot.takeProfitPrice ?? "unknown"}`,
+          `Ref: ${activeSlot.ref}`,
+          ...(missed ? [`Plan check also failed: ${missed.reason}`] : []),
+        ],
+      }),
+    );
+    return;
+  }
+
+  if (planResult.missed) {
+    yield telegram.notifyPlain(
+      formatMissedEntrySignal({
+        symbol: perpSymbol,
+        timeframe,
+        direction,
+        reason: planResult.missed.reason,
+        price: planResult.missed.entryPrice,
+        stopLossPrice: planResult.missed.stopLossPrice,
+        takeProfitPrice: planResult.missed.takeProfitPrice,
+        quantity: planResult.missed.quantity,
+        indicators,
+        details: [
+          ...(planResult.missed.walletBalance
+            ? [`Wallet: ${planResult.missed.walletBalance.toFixed(2)} ${quoteCurrency}`]
+            : []),
+          ...(planResult.missed.riskBudget
+            ? [`Risk budget: ${planResult.missed.riskBudget.toFixed(2)} ${quoteCurrency}`]
+            : []),
+          ...(planResult.missed.rawQuantity ? [`Raw quantity: ${planResult.missed.rawQuantity.toFixed(8)}`] : []),
+        ],
+      }),
+    );
+    return;
+  }
 
   yield* openDirectionalTrade({
     state,
     perpSymbol,
     quoteCurrency,
     indicators,
-    plan,
+    plan: planResult.plan,
   });
 }
 
@@ -1044,6 +1351,20 @@ type TradePlan = {
   effectiveLeverage: Big;
   leverageCapped: boolean;
 };
+
+type MissedTradePlan = {
+  reason: string;
+  direction: TradeDirection;
+  entryPrice: number | string;
+  stopLossPrice: number | string;
+  takeProfitPrice: number | string;
+  quantity: number | string;
+  rawQuantity?: Big;
+  walletBalance?: Big;
+  riskBudget?: Big;
+};
+
+type TradePlanBuildResult = { plan: TradePlan; missed?: never } | { plan?: never; missed: MissedTradePlan };
 
 type AdxDiAtrSettings = z.infer<typeof adxDiAtr.schema>;
 
