@@ -41,14 +41,21 @@ function getQuoteCurrency(symbol: string): string {
   return (symbol.split("/")[1] || "").split(":")[0];
 }
 
+function countOpenTradesByDirection(openTrades: TradeRecord[] = []) {
+  return openTrades.reduce(
+    (counts, trade) => {
+      counts[trade.direction] += 1;
+      return counts;
+    },
+    { long: 0, short: 0 } as Record<TradeDirection, number>,
+  );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Helper: Market-close all open positions
 // ════════════════════════════════════════════════════════════════════════════
 
-function* marketCloseAllPositions(
-  state: VolumeSpikeState,
-  perpSymbol: string,
-) {
+function* marketCloseAllPositions(state: VolumeSpikeState, perpSymbol: string) {
   const openTrades = state.openTrades ?? [];
 
   if (openTrades.length === 0) {
@@ -72,11 +79,16 @@ function* marketCloseAllPositions(
 
   // Close longs with a market sell
   if (totalLongQty.gt(0)) {
-    logger.info(
-      `[VolumeSpike] Market-closing ${totalLongQty.toFixed(6)} long position on ${perpSymbol}`,
-    );
+    logger.info(`[VolumeSpike] Market-closing ${totalLongQty.toFixed(6)} long position on ${perpSymbol}`);
     yield exchange.ccxt
-      .createOrder(perpSymbol, "market", "sell", totalLongQty.toNumber(), undefined, state.isHedgeMode ? { hedged: true, reduceOnly: true } : { reduceOnly: true })
+      .createOrder(
+        perpSymbol,
+        "market",
+        "sell",
+        totalLongQty.toNumber(),
+        undefined,
+        state.isHedgeMode ? { hedged: true, reduceOnly: true } : { reduceOnly: true },
+      )
       .then((order: any) => {
         logger.info(
           `[VolumeSpike] ✅ Market close (long) — Sell ${totalLongQty.toFixed(6)} @ market | orderId: ${order?.id ?? "unknown"}`,
@@ -89,11 +101,16 @@ function* marketCloseAllPositions(
 
   // Close shorts with a market buy
   if (totalShortQty.gt(0)) {
-    logger.info(
-      `[VolumeSpike] Market-closing ${totalShortQty.toFixed(6)} short position on ${perpSymbol}`,
-    );
+    logger.info(`[VolumeSpike] Market-closing ${totalShortQty.toFixed(6)} short position on ${perpSymbol}`);
     yield exchange.ccxt
-      .createOrder(perpSymbol, "market", "buy", totalShortQty.toNumber(), undefined, state.isHedgeMode ? { hedged: true, reduceOnly: true } : { reduceOnly: true })
+      .createOrder(
+        perpSymbol,
+        "market",
+        "buy",
+        totalShortQty.toNumber(),
+        undefined,
+        state.isHedgeMode ? { hedged: true, reduceOnly: true } : { reduceOnly: true },
+      )
       .then((order: any) => {
         logger.info(
           `[VolumeSpike] ✅ Market close (short) — Buy ${totalShortQty.toFixed(6)} @ market | orderId: ${order?.id ?? "unknown"}`,
@@ -191,15 +208,17 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
       const existingTrade: SmartTradeService | null = yield getSmartTrade(trade.ref);
       if (existingTrade && existingTrade.isCompleted()) {
         logger.info(`[VolumeSpike] ✅ Trade ${trade.ref} completed (TP filled) — ${trade.direction.toUpperCase()}`);
-        yield telegram.notify(formatTakeProfit({
-          botName: "Volume Spike",
-          symbol: perpSymbol,
-          direction: trade.direction === "long" ? "LONG" : "SHORT",
-          entryPrice: trade.entryPrice,
-          exitPrice: trade.tpPrice,
-          quantity: trade.quantity,
-          ref: trade.ref,
-        }));
+        yield telegram.notify(
+          formatTakeProfit({
+            botName: "Volume Spike",
+            symbol: perpSymbol,
+            direction: trade.direction === "long" ? "LONG" : "SHORT",
+            entryPrice: trade.entryPrice,
+            exitPrice: trade.tpPrice,
+            quantity: trade.quantity,
+            ref: trade.ref,
+          }),
+        );
       } else {
         stillOpen.push(trade);
       }
@@ -226,14 +245,14 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
 
   const openCount = (state.openTrades ?? []).length;
   if (openCount >= params.maxConcurrentTrades) {
-    logger.info(
-      `[VolumeSpike] Skip | At max concurrent trades (${openCount}/${params.maxConcurrentTrades})`,
+    logger.info(`[VolumeSpike] Skip | At max concurrent trades (${openCount}/${params.maxConcurrentTrades})`);
+    yield telegram.notify(
+      formatMissedOpportunity({
+        botName: "Volume Spike",
+        symbol: perpSymbol,
+        reason: `Max concurrent trades reached (${openCount}/${params.maxConcurrentTrades})`,
+      }),
     );
-    yield telegram.notify(formatMissedOpportunity({
-      botName: "Volume Spike",
-      symbol: perpSymbol,
-      reason: `Max concurrent trades reached (${openCount}/${params.maxConcurrentTrades})`,
-    }));
     return;
   }
 
@@ -252,9 +271,7 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
   const currentPrice = currentCandle.close;
 
   if (params.tradingRangeTop > 0 && currentPrice > params.tradingRangeTop) {
-    logger.info(
-      `[VolumeSpike] Skip | Price ${currentPrice.toFixed(2)} > tradingRangeTop ${params.tradingRangeTop}`,
-    );
+    logger.info(`[VolumeSpike] Skip | Price ${currentPrice.toFixed(2)} > tradingRangeTop ${params.tradingRangeTop}`);
     return;
   }
 
@@ -301,13 +318,36 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
 
   // ── All conditions met — calculate trade parameters ────────────────────
 
-  const direction: "long" | "short" = isGreenCandle ? "short" : "long";
+  const direction: TradeDirection = isGreenCandle ? "short" : "long";
   const entryPrice = new Big(currentCandle.close);
+  const openTradesByDirection = countOpenTradesByDirection(state.openTrades);
+  const oppositeDirection: TradeDirection = direction === "long" ? "short" : "long";
+  const directionOpenCount = openTradesByDirection[direction];
+  const oppositeOpenCount = openTradesByDirection[oppositeDirection];
+
+  if (directionOpenCount >= params.maxConcurrentTrades - 1 && oppositeOpenCount === 0) {
+    const reason = `${direction.toUpperCase()} signal blocked to reserve 1 slot for ${oppositeDirection.toUpperCase()} trades`;
+    const details =
+      `Open trades: ${openTradesByDirection.long} long, ${openTradesByDirection.short} short ` +
+      `(max ${params.maxConcurrentTrades})`;
+
+    logger.info(`[VolumeSpike] Skip | ${reason} | ${details}`);
+    yield telegram.notify(
+      formatMissedOpportunity({
+        botName: "Volume Spike",
+        symbol: perpSymbol,
+        reason,
+        details: `Signal: ${direction.toUpperCase()} @ ${entryPrice.toFixed(2)} | ${details}`,
+      }),
+    );
+    return;
+  }
 
   // Calculate take profit
-  const tpPriceBig = direction === "short"
-    ? entryPrice.minus(candleMove.times(params.shortTpRetreat))
-    : entryPrice.plus(candleMove.times(params.longTpBounce));
+  const tpPriceBig =
+    direction === "short"
+      ? entryPrice.minus(candleMove.times(params.shortTpRetreat))
+      : entryPrice.plus(candleMove.times(params.longTpBounce));
 
   // Fetch balance
   const exchange: IExchange = yield useExchange();
@@ -322,12 +362,14 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
 
   if (walletBalance.lte(0)) {
     logger.warn(`[VolumeSpike] Skip | No ${quoteCurrency} balance (${walletBalance.toFixed(2)})`);
-    yield telegram.notify(formatMissedOpportunity({
-      botName: "Volume Spike",
-      symbol: perpSymbol,
-      reason: `Insufficient ${quoteCurrency} balance`,
-      details: `Signal: ${direction.toUpperCase()} @ ${entryPrice.toFixed(2)} — but balance is ${walletBalance.toFixed(2)}`,
-    }));
+    yield telegram.notify(
+      formatMissedOpportunity({
+        botName: "Volume Spike",
+        symbol: perpSymbol,
+        reason: `Insufficient ${quoteCurrency} balance`,
+        details: `Signal: ${direction.toUpperCase()} @ ${entryPrice.toFixed(2)} — but balance is ${walletBalance.toFixed(2)}`,
+      }),
+    );
     return;
   }
 
@@ -344,14 +386,18 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
   if (direction === "long") {
     const denominator = entryPrice.minus(liqTarget.times(new Big(1).minus(mmr)));
     if (denominator.lte(0)) {
-      logger.warn(`[VolumeSpike] Skip | Liq target ${liqTarget.toFixed(2)} too close to entry ${entryPrice.toFixed(2)}`);
+      logger.warn(
+        `[VolumeSpike] Skip | Liq target ${liqTarget.toFixed(2)} too close to entry ${entryPrice.toFixed(2)}`,
+      );
       return;
     }
     quantityBig = effectiveBalance.div(denominator);
   } else {
     const denominator = liqTarget.times(new Big(1).plus(mmr)).minus(entryPrice);
     if (denominator.lte(0)) {
-      logger.warn(`[VolumeSpike] Skip | Liq target ${liqTarget.toFixed(2)} too close to entry ${entryPrice.toFixed(2)}`);
+      logger.warn(
+        `[VolumeSpike] Skip | Liq target ${liqTarget.toFixed(2)} too close to entry ${entryPrice.toFixed(2)}`,
+      );
       return;
     }
     quantityBig = effectiveBalance.div(denominator);
@@ -386,9 +432,9 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
 
   logger.info(
     `[VolumeSpike] 🚨 ${direction.toUpperCase()} ${tradeRef} | ${volStatus} | Move: ${priceMovePercent.times(100).toFixed(2)}%/${(params.minPriceMove * 100).toFixed(2)}% ✓ | ` +
-    `Entry: ${entryPrice.toFixed(2)} | TP: ${tpPriceBig.toFixed(2)} | Liq: ${liqTarget.toFixed(2)} | ` +
-    `Qty: ${quantityBig.toFixed(6)} | Bal: ${walletBalance.toFixed(2)} (eff: ${effectiveBalance.toFixed(2)}) ${quoteCurrency} | ` +
-    `Slot: ${openCount + 1}/${params.maxConcurrentTrades}`,
+      `Entry: ${entryPrice.toFixed(2)} | TP: ${tpPriceBig.toFixed(2)} | Liq: ${liqTarget.toFixed(2)} | ` +
+      `Qty: ${quantityBig.toFixed(6)} | Bal: ${walletBalance.toFixed(2)} (eff: ${effectiveBalance.toFixed(2)}) ${quoteCurrency} | ` +
+      `Slot: ${openCount + 1}/${params.maxConcurrentTrades}`,
   );
 
   const entrySide = direction === "long" ? "Buy" : "Sell";
@@ -424,19 +470,21 @@ export function* volumeSpike(ctx: TBotContext<VolumeSpikeConfig, VolumeSpikeStat
 
   logger.info(
     `[VolumeSpike] ✅ Trade ${tradeRef} placed — ${direction.toUpperCase()} ${quantity.toFixed(6)} @ market, TP @ ${tpPrice.toFixed(4)} | ` +
-    `Total open trades: ${state.openTrades.length}`,
+      `Total open trades: ${state.openTrades.length}`,
   );
 
-  yield telegram.notify(formatTradeEntry({
-    botName: "Volume Spike",
-    symbol: perpSymbol,
-    direction: direction === "long" ? "LONG" : "SHORT",
-    entryPrice: entryPrice.toNumber(),
-    tpPrice,
-    quantity,
-    ref: tradeRef,
-    extraInfo: `Slot: ${state.openTrades.length}/${params.maxConcurrentTrades} | Bal: ${walletBalance.toFixed(2)} ${quoteCurrency}`,
-  }));
+  yield telegram.notify(
+    formatTradeEntry({
+      botName: "Volume Spike",
+      symbol: perpSymbol,
+      direction: direction === "long" ? "LONG" : "SHORT",
+      entryPrice: entryPrice.toNumber(),
+      tpPrice,
+      quantity,
+      ref: tradeRef,
+      extraInfo: `Slot: ${state.openTrades.length}/${params.maxConcurrentTrades} | Bal: ${walletBalance.toFixed(2)} ${quoteCurrency}`,
+    }),
+  );
 }
 
 // ── Strategy metadata ──────────────────────────────────────────────────────
@@ -455,9 +503,9 @@ volumeSpike.schema = z.object({
     .default(true)
     .describe(
       "Enable or disable the volume spike requirement. When true (default), entries require the current candle's " +
-      "volume to be at least volumeMultiplier× the previous candle's volume. When false, the strategy trades " +
-      "based on price movement (minPriceMove) alone — useful in low-liquidity markets or when you want to " +
-      "capture all significant price moves regardless of volume.",
+        "volume to be at least volumeMultiplier× the previous candle's volume. When false, the strategy trades " +
+        "based on price movement (minPriceMove) alone — useful in low-liquidity markets or when you want to " +
+        "capture all significant price moves regardless of volume.",
     ),
   volumeMultiplier: z
     .number()
@@ -465,7 +513,7 @@ volumeSpike.schema = z.object({
     .default(4)
     .describe(
       "Minimum volume ratio (current / previous candle) to trigger an entry. Only used when volumeFilterEnabled is true. " +
-      "Example: 4 means the current candle must have 4× the volume of the previous candle.",
+        "Example: 4 means the current candle must have 4× the volume of the previous candle.",
     ),
   minPriceMove: z
     .number()
@@ -474,7 +522,7 @@ volumeSpike.schema = z.object({
     .default(0.02)
     .describe(
       "Minimum candle price move as fraction (0.02 = 2%) to trigger an entry. " +
-      "Always active regardless of volumeFilterEnabled. Filters out small candles that aren't worth trading.",
+        "Always active regardless of volumeFilterEnabled. Filters out small candles that aren't worth trading.",
     ),
 
   // ── Trading Range ────────────────────────────────────────────────────
@@ -484,8 +532,8 @@ volumeSpike.schema = z.object({
     .default(0)
     .describe(
       "Upper price boundary — skip entries when the candle close is above this price. " +
-      "Set to 0 (default) to disable the upper limit. " +
-      "Example: Set to 2500 to only trade when ETH is below $2,500.",
+        "Set to 0 (default) to disable the upper limit. " +
+        "Example: Set to 2500 to only trade when ETH is below $2,500.",
     ),
   tradingRangeBottom: z
     .number()
@@ -493,29 +541,25 @@ volumeSpike.schema = z.object({
     .default(0)
     .describe(
       "Lower price boundary — skip entries when the candle close is below this price. " +
-      "Set to 0 (default) to disable the lower limit. " +
-      "Example: Set to 2000 to only trade when ETH is above $2,000. " +
-      "Combined with tradingRangeTop, defines a price corridor for trading.",
+        "Set to 0 (default) to disable the lower limit. " +
+        "Example: Set to 2000 to only trade when ETH is above $2,000. " +
+        "Combined with tradingRangeTop, defines a price corridor for trading.",
     ),
 
   // ── Concurrency ──────────────────────────────────────────────────────
   maxConcurrentTrades: z
     .number()
-    .positive()
-    .default(1)
+    .min(2)
+    .default(2)
     .describe(
       "Maximum number of simultaneous open positions. Balance is divided equally across all slots. " +
-      "Set to 1 (default) for single-position behavior (original mode). " +
-      "Example: With 3 concurrent trades and $1,000 balance, each trade uses ~$333 for position sizing. " +
-      "Higher values allow capturing multiple signals but reduce per-trade size.",
+        "This strategy always reserves 1 slot for the opposite direction, so maxConcurrentTrades must be at least 2. " +
+        "Example: With 3 concurrent trades and $1,000 balance, each trade uses ~$333 for position sizing. " +
+        "Higher values allow capturing multiple signals but reduce per-trade size.",
     ),
 
   // ── Position Sizing ──────────────────────────────────────────────────
-  leverage: z
-    .number()
-    .positive()
-    .default(20)
-    .describe("Fixed leverage to set on the exchange"),
+  leverage: z.number().positive().default(20).describe("Fixed leverage to set on the exchange"),
   shortTpRetreat: z
     .number()
     .min(0)
@@ -528,16 +572,8 @@ volumeSpike.schema = z.object({
     .max(1)
     .default(0.3)
     .describe("Long TP: fraction of candle drop to bounce (0.3 = 30%)"),
-  shortLiquidationTarget: z
-    .number()
-    .positive()
-    .default(3042)
-    .describe("Target liquidation price for short positions"),
-  longLiquidationTarget: z
-    .number()
-    .positive()
-    .default(1200)
-    .describe("Target liquidation price for long positions"),
+  shortLiquidationTarget: z.number().positive().default(3042).describe("Target liquidation price for short positions"),
+  longLiquidationTarget: z.number().positive().default(1200).describe("Target liquidation price for long positions"),
   maintenanceMarginRate: z
     .number()
     .min(0)
@@ -562,11 +598,13 @@ volumeSpike.watchers = {
 
 type TradeRecord = {
   ref: string;
-  direction: "long" | "short";
+  direction: TradeDirection;
   quantity: number;
   entryPrice: number;
   tpPrice: number;
 };
+
+type TradeDirection = "long" | "short";
 
 type VolumeSpikeState = {
   openTrades?: TradeRecord[];
