@@ -14,12 +14,7 @@ import {
   type SmartTradeService,
 } from "@opentrader/bot-processor";
 import { logger } from "@opentrader/logger";
-import {
-  telegram,
-  formatBotStarted,
-  formatBotStopped,
-  formatTradeEntry,
-} from "@opentrader/telegram";
+import { telegram, formatBotStarted, formatBotStopped, formatTradeEntry } from "@opentrader/telegram";
 import { getQuoteCurrency, toPerpSymbol } from "./utils.js";
 
 const HISTORY_CANDLES = 100;
@@ -693,6 +688,24 @@ function* buildTradePlan({
 
   const stopLossPrice = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, bigToNumber(stopLoss)));
   const takeProfitPrice = parseFloat(exchange.ccxt.priceToPrecision(perpSymbol, bigToNumber(takeProfit)));
+  const preciseTakeProfit = new Big(takeProfitPrice);
+  const takeProfitPercent = preciseTakeProfit.minus(currentPrice).abs().div(currentPrice).times(100);
+
+  if (takeProfitPercent.lt(params.minTakeProfitPercent)) {
+    const reason = `take-profit distance too small (${takeProfitPercent.toFixed(4)}% < ${params.minTakeProfitPercent}%)`;
+    logger.warn(`[AdxDiAtr] Skip | ${reason}`);
+    return {
+      missed: {
+        reason,
+        direction,
+        entryPrice: bigToNumber(currentPrice),
+        stopLossPrice,
+        takeProfitPrice,
+        quantity: 0,
+        takeProfitPercent,
+      },
+    };
+  }
 
   const rawBalance: Record<string, any> | null = yield exchange.ccxt
     .fetchBalance({ type: "swap" })
@@ -1210,6 +1223,11 @@ export function* adxDiAtr(ctx: TBotContext<AdxDiAtrConfig, AdxDiAtrState>): Gene
           ...(planResult.missed.riskBudget
             ? [`Risk budget: ${planResult.missed.riskBudget.toFixed(2)} ${quoteCurrency}`]
             : []),
+          ...(planResult.missed.takeProfitPercent
+            ? [
+                `Take profit distance: ${planResult.missed.takeProfitPercent.toFixed(4)}% (min ${params.minTakeProfitPercent}%)`,
+              ]
+            : []),
           ...(planResult.missed.rawQuantity ? [`Raw quantity: ${planResult.missed.rawQuantity.toFixed(8)}`] : []),
         ],
       }),
@@ -1228,7 +1246,7 @@ export function* adxDiAtr(ctx: TBotContext<AdxDiAtrConfig, AdxDiAtrState>): Gene
 
 adxDiAtr.displayName = "ADX DI ATR Trend";
 adxDiAtr.description =
-  "Trend-following strategy using ADX strength, ADX slope, DI direction, and ATR-based stop-loss/take-profit levels on the selected bot timeframe.";
+  "Trend-following strategy using ADX strength, ADX slope, DI direction, and ATR-based stop-loss/take-profit levels on the selected bot timeframe, with a minimum take-profit distance filter.";
 
 adxDiAtr.schema = z.object({
   adxPeriod: z.number().positive().default(14).describe("Wilder period used for ADX, DI, and ATR calculations."),
@@ -1254,6 +1272,11 @@ adxDiAtr.schema = z.object({
     .positive()
     .default(4)
     .describe("Take-profit distance from entry in ATR multiples."),
+  minTakeProfitPercent: z
+    .number()
+    .min(0)
+    .default(0.33)
+    .describe("Minimum absolute percentage distance from entry price to take-profit price required before entry."),
   moveStopToBreakeven: z
     .boolean()
     .default(false)
@@ -1360,6 +1383,7 @@ type MissedTradePlan = {
   takeProfitPrice: number | string;
   quantity: number | string;
   rawQuantity?: Big;
+  takeProfitPercent?: Big;
   walletBalance?: Big;
   riskBudget?: Big;
 };
