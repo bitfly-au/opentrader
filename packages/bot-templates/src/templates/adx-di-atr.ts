@@ -1047,6 +1047,11 @@ export function* adxDiAtr(ctx: TBotContext<AdxDiAtrConfig, AdxDiAtrState>): Gene
 
     const startExchange: IExchange = yield useExchange();
     yield startExchange.ccxt
+      .setMarginMode("cross", perpSymbol)
+      .then(() => logger.info(`[AdxDiAtr] Margin mode set to CROSS for ${perpSymbol}`))
+      .catch((err: Error) => logger.warn(`[AdxDiAtr] setMarginMode: ${err.message}`));
+
+    yield startExchange.ccxt
       .setLeverage(params.leverage, perpSymbol)
       .then(() => logger.info(`[AdxDiAtr] Leverage set to ${params.leverage}x for ${perpSymbol}`))
       .catch((err: Error) => logger.warn(`[AdxDiAtr] setLeverage: ${err.message}`));
