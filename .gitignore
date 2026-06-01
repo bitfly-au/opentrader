@@ -32,3 +32,5 @@ tsconfig.tsbuildinfo
 .moon/cache
 .moon/docker
 memory-bank
+.env.prod
+opentrader_data_prod
