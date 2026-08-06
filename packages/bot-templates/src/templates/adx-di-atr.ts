@@ -390,8 +390,9 @@ function formatSmartTradeLegsPlaced({
     }),
     `Stop loss order: Market ${plan.direction === "long" ? "SELL" : "BUY"} stop @ ${plan.stopLossPrice}`,
     `Take profit order: Limit ${plan.direction === "long" ? "SELL" : "BUY"} @ ${plan.takeProfitPrice}`,
-    `Wallet: ${plan.walletBalance.toFixed(2)} ${quoteCurrency} | Risk budget: ${plan.riskBudget.toFixed(2)} ${quoteCurrency}`,
-    `Effective leverage: ${plan.effectiveLeverage.toFixed(2)}x | Leverage capped: ${plan.leverageCapped ? "yes" : "no"}`,
+    `Wallet: ${plan.walletBalance.toFixed(2)} ${quoteCurrency} | Margin budget: ${plan.marginBudget.toFixed(2)} ${quoteCurrency}`,
+    `Allocated margin: ${plan.allocatedMargin.toFixed(2)} ${quoteCurrency} | Planned stop risk: ${plan.plannedStopRisk.toFixed(2)} ${quoteCurrency}`,
+    `Effective leverage: ${plan.effectiveLeverage.toFixed(2)}x | Margin capped: ${plan.marginCapped ? "yes" : "no"}`,
   ].join("\n");
 }
 
@@ -641,8 +642,8 @@ function* reconcileTradeSlots(
 }
 
 /**
- * Calculates ATR stop/target prices and quantity using the existing risk model:
- * riskFractionOfBalance, leverage cap, and exchange price/amount precision.
+ * Calculates ATR stop/target prices and quantity using the configured margin
+ * budget, stop-loss risk cap, and exchange price/amount precision.
  */
 function* buildTradePlan({
   exchange,
@@ -751,11 +752,12 @@ function* buildTradePlan({
     };
   }
 
-  const riskBudget = walletBalance.times(params.riskFractionOfBalance);
-  const qtyRisk = riskBudget.div(stopDistance);
+  const marginBudget = walletBalance.times(params.riskFractionOfBalance);
+  const stopRiskBudget = marginBudget;
+  const qtyStopRiskCap = stopRiskBudget.div(stopDistance);
   const configuredLeverage = new Big(params.leverage);
-  const qtyLevCap = walletBalance.times(configuredLeverage).div(currentPrice);
-  const quantityBig = qtyRisk.gt(qtyLevCap) ? qtyLevCap : qtyRisk;
+  const qtyMarginCap = marginBudget.times(configuredLeverage).div(currentPrice);
+  const quantityBig = qtyStopRiskCap.gt(qtyMarginCap) ? qtyMarginCap : qtyStopRiskCap;
 
   if (quantityBig.lte(0)) {
     const reason = `calculated quantity is zero or invalid (${quantityBig.toFixed(6)})`;
@@ -769,7 +771,8 @@ function* buildTradePlan({
         takeProfitPrice,
         quantity: quantityBig.toFixed(6),
         walletBalance,
-        riskBudget,
+        marginBudget,
+        stopRiskBudget,
       },
     };
   }
@@ -789,13 +792,16 @@ function* buildTradePlan({
         quantity: 0,
         rawQuantity: quantityBig,
         walletBalance,
-        riskBudget,
+        marginBudget,
+        stopRiskBudget,
       },
     };
   }
 
   const quantityPrecise = new Big(quantity);
   const notional = currentPrice.times(quantityPrecise);
+  const allocatedMargin = configuredLeverage.gt(0) ? notional.div(configuredLeverage) : new Big(0);
+  const plannedStopRisk = stopDistance.times(quantityPrecise);
   const effectiveLeverage = walletBalance.gt(0) ? notional.div(walletBalance) : new Big(0);
 
   return {
@@ -806,10 +812,14 @@ function* buildTradePlan({
       takeProfitPrice,
       quantity,
       walletBalance,
-      riskBudget,
+      marginBudget,
+      stopRiskBudget,
+      allocatedMargin,
+      plannedStopRisk,
       configuredLeverage,
       effectiveLeverage,
-      leverageCapped: qtyRisk.gt(qtyLevCap),
+      marginCapped: qtyStopRiskCap.gt(qtyMarginCap),
+      stopRiskCapped: qtyMarginCap.gt(qtyStopRiskCap),
     },
   };
 }
@@ -840,8 +850,9 @@ function* openDirectionalTrade({
     `[AdxDiAtr] Entering ${direction.toUpperCase()} | Entry ${plan.entryPrice.toFixed(4)} | ` +
       `SL ${plan.stopLossPrice} | TP ${plan.takeProfitPrice} | ` +
       `Qty ${plan.quantity} | Bal ${plan.walletBalance.toFixed(2)} ${quoteCurrency} | ` +
-      `RiskBudget ${plan.riskBudget.toFixed(2)} ${quoteCurrency} | ConfigLev ${plan.configuredLeverage.toFixed(2)}x | ` +
-      `EffectiveLev ${plan.effectiveLeverage.toFixed(2)}x | LeverageCapped ${plan.leverageCapped ? "yes" : "no"} | Ref ${ref}`,
+      `MarginBudget ${plan.marginBudget.toFixed(2)} ${quoteCurrency} | AllocatedMargin ${plan.allocatedMargin.toFixed(2)} ${quoteCurrency} | ` +
+      `PlannedStopRisk ${plan.plannedStopRisk.toFixed(2)} ${quoteCurrency} | ConfigLev ${plan.configuredLeverage.toFixed(2)}x | ` +
+      `EffectiveLev ${plan.effectiveLeverage.toFixed(2)}x | MarginCapped ${plan.marginCapped ? "yes" : "no"} | Ref ${ref}`,
   );
 
   yield useSmartTrade(
@@ -892,9 +903,10 @@ function* openDirectionalTrade({
       extraInfo:
         `ADX: ${indicators.adx.toFixed(2)} | +DI: ${indicators.plusDI.toFixed(2)} | ` +
         `-DI: ${indicators.minusDI.toFixed(2)} | ATR: ${indicators.atr.toFixed(4)} | ` +
-        `Bal: ${plan.walletBalance.toFixed(2)} ${quoteCurrency} | Risk: ${plan.riskBudget.toFixed(2)} ${quoteCurrency} | ` +
+        `Bal: ${plan.walletBalance.toFixed(2)} ${quoteCurrency} | Margin budget: ${plan.marginBudget.toFixed(2)} ${quoteCurrency} | ` +
+        `Allocated margin: ${plan.allocatedMargin.toFixed(2)} ${quoteCurrency} | Planned stop risk: ${plan.plannedStopRisk.toFixed(2)} ${quoteCurrency} | ` +
         `Config lev: ${plan.configuredLeverage.toFixed(2)}x | Effective lev: ${plan.effectiveLeverage.toFixed(2)}x | ` +
-        `Leverage capped: ${plan.leverageCapped ? "yes" : "no"} | Ref: ${ref}`,
+        `Margin capped: ${plan.marginCapped ? "yes" : "no"} | Stop-risk capped: ${plan.stopRiskCapped ? "yes" : "no"} | Ref: ${ref}`,
     }),
   );
 
@@ -1225,8 +1237,11 @@ export function* adxDiAtr(ctx: TBotContext<AdxDiAtrConfig, AdxDiAtrState>): Gene
           ...(planResult.missed.walletBalance
             ? [`Wallet: ${planResult.missed.walletBalance.toFixed(2)} ${quoteCurrency}`]
             : []),
-          ...(planResult.missed.riskBudget
-            ? [`Risk budget: ${planResult.missed.riskBudget.toFixed(2)} ${quoteCurrency}`]
+          ...(planResult.missed.marginBudget
+            ? [`Margin budget: ${planResult.missed.marginBudget.toFixed(2)} ${quoteCurrency}`]
+            : []),
+          ...(planResult.missed.stopRiskBudget
+            ? [`Stop-risk budget: ${planResult.missed.stopRiskBudget.toFixed(2)} ${quoteCurrency}`]
             : []),
           ...(planResult.missed.takeProfitPercent
             ? [
@@ -1306,7 +1321,7 @@ adxDiAtr.schema = z.object({
     .lte(1)
     .default(0.5)
     .describe(
-      "Fraction of available balance to lose if stop loss is hit. 0.5 means risk 50% of wallet balance per trade.",
+      "Fraction of available balance to allocate as position margin. 0.5 means use at most 50% of wallet balance as margin per trade. The same amount is also used as the maximum planned stop-loss risk.",
     ),
   telegramAdxUpdates: z
     .boolean()
@@ -1374,10 +1389,14 @@ type TradePlan = {
   takeProfitPrice: number;
   quantity: number;
   walletBalance: Big;
-  riskBudget: Big;
+  marginBudget: Big;
+  stopRiskBudget: Big;
+  allocatedMargin: Big;
+  plannedStopRisk: Big;
   configuredLeverage: Big;
   effectiveLeverage: Big;
-  leverageCapped: boolean;
+  marginCapped: boolean;
+  stopRiskCapped: boolean;
 };
 
 type MissedTradePlan = {
@@ -1390,7 +1409,8 @@ type MissedTradePlan = {
   rawQuantity?: Big;
   takeProfitPercent?: Big;
   walletBalance?: Big;
-  riskBudget?: Big;
+  marginBudget?: Big;
+  stopRiskBudget?: Big;
 };
 
 type TradePlanBuildResult = { plan: TradePlan; missed?: never } | { plan?: never; missed: MissedTradePlan };
